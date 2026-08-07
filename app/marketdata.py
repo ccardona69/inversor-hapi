@@ -1,0 +1,134 @@
+"""Módulo 3: datos de mercado con fuente, fecha/hora y estado de actualización.
+
+Fuente primaria: API pública de gráficos de Yahoo Finance (sin clave). Si no
+está disponible, el sistema lo informa y permite ingreso manual. Ningún dato
+se presenta sin su fuente y antigüedad; `staleness()` clasifica la frescura.
+"""
+import json
+import urllib.request
+from datetime import datetime, timezone
+
+YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={rng}&interval=1d"
+HEADERS = {"User-Agent": "Mozilla/5.0 (InversorHapi-MVP)"}
+TIMEOUT = 10
+
+
+class MarketDataError(Exception):
+    pass
+
+
+def _fetch_json(url: str) -> dict:
+    req = urllib.request.Request(url, headers=HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            return json.loads(r.read().decode())
+    except Exception as e:
+        raise MarketDataError(f"Fuente de datos no disponible ({e.__class__.__name__}). "
+                              "Puedes ingresar el precio manualmente.") from e
+
+
+def fetch_quote(ticker: str) -> dict:
+    data = _fetch_json(YAHOO_CHART.format(ticker=ticker.upper(), rng="5d"))
+    result = (data.get("chart", {}).get("result") or [None])[0]
+    if not result:
+        raise MarketDataError(f"Sin datos para {ticker}")
+    meta = result["meta"]
+    price = meta.get("regularMarketPrice")
+    prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+    ts = meta.get("regularMarketTime")
+    asof = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds") if ts else None
+    return {
+        "ticker": ticker.upper(), "price": price, "currency": meta.get("currency", "USD"),
+        "asof": asof, "source": "Yahoo Finance (chart API)",
+        "day_change_pct": round((price / prev - 1) * 100, 2) if price and prev else None,
+        "fifty_two_week_high": meta.get("fiftyTwoWeekHigh"), "fifty_two_week_low": meta.get("fiftyTwoWeekLow"),
+        "exchange": meta.get("fullExchangeName"),
+    }
+
+
+def fetch_history(ticker: str, rng: str = "1y") -> dict:
+    data = _fetch_json(YAHOO_CHART.format(ticker=ticker.upper(), rng=rng))
+    result = (data.get("chart", {}).get("result") or [None])[0]
+    if not result or not result.get("timestamp"):
+        raise MarketDataError(f"Sin histórico para {ticker}")
+    quote = result["indicators"]["quote"][0]
+    rows = [
+        {"date": datetime.fromtimestamp(t, tz=timezone.utc).date().isoformat(),
+         "close": c, "volume": v}
+        for t, c, v in zip(result["timestamp"], quote["close"], quote["volume"]) if c is not None
+    ]
+    return {"ticker": ticker.upper(), "source": "Yahoo Finance (chart API)",
+            "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "rows": rows}
+
+
+def staleness(asof_iso: str | None) -> dict:
+    """Clasifica la antigüedad de un dato para no usar datos viejos como actuales."""
+    if not asof_iso:
+        return {"age_hours": None, "status": "sin_fecha", "usable_as_current": False}
+    try:
+        asof = datetime.fromisoformat(asof_iso.replace("Z", "+00:00"))
+        if asof.tzinfo is None:
+            asof = asof.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return {"age_hours": None, "status": "sin_fecha", "usable_as_current": False}
+    hours = (datetime.now(timezone.utc) - asof).total_seconds() / 3600
+    if hours <= 24:
+        status = "actual"
+    elif hours <= 24 * 5:
+        status = "reciente"  # cubre fines de semana / feriados de mercado
+    else:
+        status = "desactualizado"
+    return {"age_hours": round(hours, 1), "status": status, "usable_as_current": hours <= 24 * 5}
+
+
+# ---------- indicadores técnicos (Módulo 6, información complementaria) ----------
+
+def sma(values, n):
+    if len(values) < n:
+        return None
+    return sum(values[-n:]) / n
+
+
+def rsi(closes, period=14):
+    if len(closes) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(-period, 0):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(d, 0))
+        losses.append(max(-d, 0))
+    avg_g, avg_l = sum(gains) / period, sum(losses) / period
+    if avg_l == 0:
+        return 100.0
+    return round(100 - 100 / (1 + avg_g / avg_l), 1)
+
+
+def technical_summary(history_rows: list) -> dict:
+    closes = [r["close"] for r in history_rows]
+    if len(closes) < 30:
+        return {"error": "Histórico insuficiente para análisis técnico"}
+    price = closes[-1]
+    s50, s200 = sma(closes, 50), sma(closes, 200)
+    hi, lo = max(closes), min(closes)
+    rets = [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes))]
+    mean = sum(rets) / len(rets)
+    vol_daily = (sum((r - mean) ** 2 for r in rets) / len(rets)) ** 0.5
+    # Caída máxima del periodo (drawdown)
+    peak, max_dd = closes[0], 0.0
+    for c in closes:
+        peak = max(peak, c)
+        max_dd = min(max_dd, c / peak - 1)
+    trend = "alcista" if s50 and s200 and s50 > s200 and price > s50 else (
+        "bajista" if s50 and price < s50 else "lateral/indefinida")
+    return {
+        "precio": round(price, 2), "sma50": round(s50, 2) if s50 else None,
+        "sma200": round(s200, 2) if s200 else None, "rsi14": rsi(closes),
+        "tendencia": trend,
+        "maximo_periodo": round(hi, 2), "minimo_periodo": round(lo, 2),
+        "distancia_a_maximo_pct": round((price / hi - 1) * 100, 1),
+        "volatilidad_anualizada_pct": round(vol_daily * (252 ** 0.5) * 100, 1),
+        "caida_maxima_periodo_pct": round(max_dd * 100, 1),
+        "soporte_aproximado": round(min(closes[-60:]), 2) if len(closes) >= 60 else round(lo, 2),
+        "resistencia_aproximada": round(max(closes[-60:]), 2) if len(closes) >= 60 else round(hi, 2),
+        "nota": "Indicadores complementarios; nunca son razón única para operar.",
+    }

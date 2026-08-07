@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inversor Hapi IA — Decisiones explicables</title>
+<style>
+  :root{--bg:#f5f7f9;--card:#fff;--ink:#15222e;--mut:#5f7182;--line:#e2e8ee;--acc:#0d6e5f;--acc2:#e5f3f0;--warn:#b54708;--err:#b42318;--ok:#12805c;--r:12px}
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.5 system-ui,'Segoe UI',sans-serif;background:var(--bg);color:var(--ink)}
+  #layout{display:flex;min-height:100vh}
+  nav{width:225px;background:#0e1f1c;color:#c4d6d1;padding:18px 10px;flex-shrink:0}
+  nav h1{font-size:18px;color:#fff;margin:4px 10px 16px}
+  nav h1 span{color:#5fd4bc}
+  nav a{display:block;padding:7px 12px;border-radius:8px;color:inherit;text-decoration:none;font-size:14px;margin-bottom:2px}
+  nav a.active,nav a:hover{background:#1c3a34;color:#fff}
+  main{flex:1;padding:26px 30px;max-width:1150px}
+  h2{margin:0 0 4px;font-size:22px} h3{font-size:16px}
+  .sub{color:var(--mut);margin:0 0 16px;font-size:13.5px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:18px;margin-bottom:16px}
+  .grid{display:grid;gap:14px}.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(4,1fr)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  input,select,textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font:inherit;background:#fff}
+  textarea{min-height:70px;resize:vertical}
+  label{font-size:12.5px;color:var(--mut);display:block;margin:8px 0 3px}
+  button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:9px 15px;font:inherit;font-weight:600;cursor:pointer}
+  button.sec{background:var(--acc2);color:var(--acc)} button.danger{background:#fee4e2;color:var(--err)}
+  button.mini{padding:4px 10px;font-size:13px;font-weight:500}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  .pill{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:600;background:var(--acc2);color:var(--acc)}
+  .pill.warn{background:#fef0e6;color:var(--warn)}.pill.err{background:#fee4e2;color:var(--err)}
+  .pill.ok{background:#e6f4ef;color:var(--ok)}.pill.mut{background:#edf0f3;color:var(--mut)}
+  .big{font-size:24px;font-weight:700}.pos{color:var(--ok)}.neg{color:var(--err)}
+  .mut{color:var(--mut)}.sm{font-size:13px}
+  .alert{border-left:4px solid var(--warn);background:#fffaf5;padding:9px 13px;border-radius:0 8px 8px 0;margin-bottom:8px;font-size:13.5px}
+  .alert.riesgo_elevado{border-color:var(--err);background:#fff5f4}
+  .alert.informativa{border-color:var(--acc);background:#f3faf8}
+  pre{background:#f0f3f5;border-radius:8px;padding:12px;overflow:auto;font-size:12.5px;white-space:pre-wrap}
+  #login{max-width:380px;margin:80px auto}
+  .qbox{border:1px solid var(--line);border-radius:10px;padding:11px;margin-bottom:9px;font-size:13.5px}
+  .hidden{display:none}
+  .disc{font-size:12px;color:var(--mut);border-top:1px solid var(--line);margin-top:20px;padding-top:10px}
+  details summary{cursor:pointer;font-weight:600;font-size:14px;margin:6px 0}
+  @media(max-width:880px){#layout{flex-direction:column}nav{width:100%;display:flex;flex-wrap:wrap}nav h1{width:100%}main{padding:14px}.g2,.g3,.g4{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div id="login" class="card">
+  <h2>Inversor <span style="color:var(--acc)">Hapi IA</span></h2>
+  <p class="sub">Apoyo a decisiones de inversión explicables. No promete rentabilidad ni ejecuta operaciones.</p>
+  <label>Correo</label><input id="l-email" type="email">
+  <label>Contraseña (mín. 8)</label><input id="l-pass" type="password">
+  <div class="row" style="margin-top:14px"><button onclick="doLogin()">Entrar</button>
+  <button class="sec" onclick="doRegister()">Crear cuenta</button></div>
+  <p id="l-msg" class="sm" style="color:var(--err)"></p>
+</div>
+
+<div id="layout" class="hidden">
+<nav>
+  <h1>Inversor <span>Hapi IA</span></h1>
+  <a href="#inicio">📊 Mi cartera y riesgo</a>
+  <a href="#cartera">💼 Posiciones</a>
+  <a href="#diario">📓 Diario (antes de operar)</a>
+  <div style="border-top:1px solid #1c3a34;margin:14px 10px 8px"></div>
+  <div style="font-size:11px;color:#7fa79c;margin:0 12px 5px;text-transform:uppercase;letter-spacing:.05em">Ajustes</div>
+  <a href="#perfil">🧭 Perfil de riesgo</a>
+  <a href="#config">⚙️ Configuración</a>
+  <a href="#" onclick="logout();return false" style="margin-top:12px;color:#7fa79c">Salir</a>
+</nav>
+<main id="view"></main>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = (n,d=2) => n==null?'—':Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+const cls = n => n==null?'':(n>=0?'pos':'neg');
+async function api(path, opts={}){
+  const r = await fetch('/api'+path,{headers:{'Content-Type':'application/json'},...opts,
+    body: opts.body?JSON.stringify(opts.body):undefined});
+  const data = await r.json().catch(()=>({}));
+  if(r.status===401 && path!=='/me'){ showLogin(); throw new Error('sesión'); }
+  if(!r.ok){ data._status=r.status; throw data; }
+  return data;
+}
+function showLogin(){ $('#login').classList.remove('hidden'); $('#layout').classList.add('hidden'); }
+function showApp(){ $('#login').classList.add('hidden'); $('#layout').classList.remove('hidden'); route(); }
+async function doLogin(){ try{ await api('/login',{method:'POST',body:{email:$('#l-email').value,password:$('#l-pass').value}}); showApp(); }catch(e){ $('#l-msg').textContent=e.detail||'Error'; } }
+async function doRegister(){ try{ await api('/register',{method:'POST',body:{email:$('#l-email').value,password:$('#l-pass').value}}); showApp(); }catch(e){ $('#l-msg').textContent=e.detail||'Error'; } }
+async function logout(){ await api('/logout',{method:'POST'}); showLogin(); }
+window.addEventListener('hashchange', route);
+async function route(){
+  const [page, arg] = location.hash.replace('#','').split('/');
+  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active', a.hash==='#'+(page||'inicio')));
+  const views = {inicio,cartera,analisis,comparador,simulador,oportunidades,alertas:alertasView,diario,historial,perfil,config};
+  try{ await (views[page||'inicio']||inicio)(arg); }
+  catch(e){ if(e.message!=='sesión') $('#view').innerHTML=`<div class="card">Error: ${esc(e.detail||e.message||JSON.stringify(e))}</div>`; }
+}
+const DISC = '<p class="disc">Herramienta de apoyo con datos aportados por el usuario y fuentes públicas citadas. No es asesoría financiera regulada, no garantiza rentabilidad y no ejecuta operaciones.</p>';
+
+/* ---------- 1. Inicio (panel principal) ---------- */
+async function inicio(){
+  const d = await api('/dashboard');
+  const t = d.portfolio.totals;
+  $('#view').innerHTML = `
+  <h2>Panel principal</h2><p class="sub">Todo dato muestra su fuente, fecha y estado de verificación.</p>
+  <div class="grid g4">
+    <div class="card"><div class="mut sm">Valor actual</div><div class="big">$ ${fmt(t.valor_actual)}</div></div>
+    <div class="card"><div class="mut sm">Capital invertido</div><div class="big">$ ${fmt(t.invertido)}</div></div>
+    <div class="card"><div class="mut sm">Resultado</div><div class="big ${cls(t.resultado)}">$ ${fmt(t.resultado)}</div></div>
+    <div class="card"><div class="mut sm">Rendimiento</div><div class="big ${cls(t.rendimiento_pct)}">${fmt(t.rendimiento_pct)} %</div></div>
+  </div>
+  <div class="grid g2">
+  <div class="card"><h3>Distribución y concentración</h3>
+    ${Object.entries(t.pesos_pct||{}).map(([k,v])=>`<div class="row sm"><span style="width:60px"><b>${k}</b></span><span>${v} %</span></div>`).join('')||'<p class="mut sm">Sin posiciones</p>'}
+    <p class="sm" style="margin-top:8px">Concentración: <span class="pill ${d.risk.nivel_concentracion==='alta'?'err':'ok'}">${esc(d.risk.nivel_concentracion||'—')}</span>
+     · HHI ${d.risk.hhi||'—'} · diversificación efectiva ≈ ${d.risk.diversificacion_efectiva||'—'} posiciones</p>
+    ${(d.risk.correlacion||[]).map(c=>`<div class="alert">${esc(c)}</div>`).join('')}
+  </div>
+  <div class="card"><h3>Alertas (${d.alerts.length})</h3>
+    ${d.alerts.slice(0,6).map(a=>`<div class="alert ${a.level}"><span class="pill mut">${esc(a.level.replaceAll('_',' '))}</span> ${esc(a.text)}</div>`).join('')||'<p class="mut sm">Sin alertas</p>'}
+  </div></div>
+  <div class="grid g2">
+  <div class="card"><h3>Calidad de los datos</h3>
+    <table><tr><th>Ticker</th><th>Precio</th><th>Verificada</th></tr>
+    ${d.calidad_datos.map(q=>`<tr><td>${q.ticker}</td><td><span class="pill ${q.estado_precio==='actual'?'ok':'warn'}">${esc(q.estado_precio.replaceAll('_',' '))}</span></td>
+      <td>${q.verificada?'✅':'⏳ pendiente'}</td></tr>`).join('')}</table>
+    <div class="row" style="margin-top:8px"><button class="mini" onclick="refreshPrices().then(inicio)">Actualizar precios</button></div></div>
+  <div class="card"><h3>Tesis recientes (Diario)</h3>
+    ${(d.tesis_recientes||[]).map(x=>`<div class="qbox"><b>${esc(x.ticker||'cartera')}</b> · ${esc(x.action||'')}
+      ${x.done?'<span class="pill ok">evaluada</span>':(x.review_date?`<span class="pill warn">revisar ${esc(x.review_date)}</span>`:'')}
+      <span class="mut sm">${(x.created_at||'').slice(0,10)}</span></div>`).join('')||'<p class="mut sm">Aún no registras tesis. Anota una en el Diario antes de operar.</p>'}
+  </div></div>
+  ${d.portfolio.positions.length?'':`<div class="card"><h3>Empezar</h3>
+    <p class="sm">Carga la cartera que reportaste desde Hapi (NVDA + MSFT, quedará marcada «pendiente de verificación») o registra posiciones manualmente en Cartera.</p>
+    <button onclick="api('/seed_hapi',{method:'POST'}).then(r=>{alert(r.detail);inicio()})">Cargar mi cartera de Hapi</button></div>`}
+  ${DISC}`;
+}
+async function refreshPrices(){
+  const r = await api('/prices/refresh',{method:'POST'});
+  if(r.errors.length) alert('Algunos precios no se pudieron obtener:\n'+r.errors.map(e=>e.ticker+': '+e.error).join('\n')+'\nPuedes ingresarlos manualmente en Cartera.');
+  return r;
+}
+
+/* ---------- 2. Cartera ---------- */
+async function cartera(){
+  const [pf, val] = await Promise.all([api('/portfolio'), api('/validate')]);
+  $('#view').innerHTML = `
+  <h2>Cartera</h2><p class="sub">Registro manual, importación desde tu reporte de Hapi y validación de datos (Módulos 1 y 2).</p>
+  <div class="card"><div class="row">
+    <button class="sec" onclick="api('/seed_hapi',{method:'POST'}).then(cartera)">Cargar cartera reportada de Hapi</button>
+    <button class="sec" onclick="refreshPrices().then(cartera)">Actualizar precios (Yahoo Finance)</button>
+    <span class="sm mut">Efectivo disponible: $</span><input id="cash" style="width:110px" value="${pf.cash}">
+    <button class="mini" onclick="api('/cash',{method:'PUT',body:{amount:+$('#cash').value}}).then(cartera)">Guardar</button>
+  </div></div>
+  <div class="card"><h3>Sincronizar con Hapi — importar archivo (CSV)</h3>
+    <p class="sm mut">Exportá tus posiciones desde la app de Hapi y subí el archivo aquí. <b>No se piden tus credenciales</b> ni se conecta a tu cuenta: lees el archivo vos. Los datos entran marcados «pendiente de verificación».</p>
+    <input type="file" id="csv-file" accept=".csv,.txt,text/csv" onchange="parseCsv(this)">
+    <div id="csv-map"></div>
+  </div>
+  <div class="card"><h3>Posiciones</h3>
+  <table><tr><th>Ticker</th><th>Cantidad</th><th>Costo prom.</th><th>Invertido</th><th>Valor actual</th><th>P/L</th><th>Precio usado</th><th></th></tr>
+  ${pf.positions.map(p=>`<tr>
+    <td><b>${p.ticker}</b><br><span class="sm mut">${esc(p.name||'')}</span></td>
+    <td>${p.qty}</td><td>$ ${fmt(p.avg_cost)}</td><td>$ ${fmt(p.invested)}</td>
+    <td>$ ${fmt(p.market_value)}</td><td class="${cls(p.unrealized_pl)}">$ ${fmt(p.unrealized_pl)} (${fmt(p.return_pct)}%)</td>
+    <td class="sm">${fmt(p.price_info.precio_usado)}<br><span class="mut">${esc(p.price_info.fuente||'')}</span><br>
+      <span class="pill ${p.price_status==='actual'?'ok':'warn'}">${esc(p.price_status.replaceAll('_',' '))}</span>
+      ${p.verified?'<span class="pill ok">verificada</span>':`<button class="mini sec" onclick="api('/positions/${p.ticker}/verify',{method:'POST'}).then(cartera)">Confirmar datos</button>`}</td>
+    <td><button class="mini danger" onclick="if(confirm('¿Eliminar ${p.ticker}?'))api('/positions/${p.ticker}',{method:'DELETE'}).then(cartera)">✕</button></td>
+  </tr>`).join('')}</table>
+  <p class="sm" style="margin-top:8px"><b>Totales:</b> invertido $ ${fmt(pf.totals.invertido)} · valor $ ${fmt(pf.totals.valor_actual)} ·
+   resultado <span class="${cls(pf.totals.resultado)}">$ ${fmt(pf.totals.resultado)} (${fmt(pf.totals.rendimiento_pct)}%)</span></p></div>
+  <div class="grid g2">
+  <div class="card"><h3>Agregar / editar posición</h3>
+    <div class="grid g2">
+    <div><label>Ticker</label><input id="p-tk"></div><div><label>Nombre</label><input id="p-name"></div>
+    <div><label>Cantidad</label><input id="p-qty" type="number" step="any"></div>
+    <div><label>Costo promedio (USD)</label><input id="p-avg" type="number" step="any"></div>
+    <div><label>Invertido total (USD, opcional)</label><input id="p-inv" type="number" step="any"></div>
+    <div><label>Fuente del dato</label><input id="p-src" value="manual"></div></div>
+    <button style="margin-top:10px" onclick="addPos()">Guardar posición</button></div>
+  <div class="card"><h3>Precio manual (si la fuente falla)</h3>
+    <div class="grid g2"><div><label>Ticker</label><input id="mp-tk"></div>
+    <div><label>Precio USD</label><input id="mp-p" type="number" step="any"></div>
+    <div><label>Fecha/hora (ISO)</label><input id="mp-asof" value="${new Date().toISOString().slice(0,16)}"></div>
+    <div><label>Fuente</label><input id="mp-src" placeholder="p. ej. app de Hapi, 19/07 10:30"></div></div>
+    <button class="sec" style="margin-top:10px" onclick="manualPrice()">Registrar precio</button></div>
+  </div>
+  <div class="card"><h3>Validación de datos (Módulo 2)</h3>
+  ${val.report.map(r=>`<details><summary>${r.ticker} ${r.inconsistencias.length?`<span class="pill err">${r.inconsistencias.length} inconsistencia(s)</span>`:'<span class="pill ok">coherente</span>'}</summary>
+    ${r.inconsistencias.map(x=>`<div class="alert riesgo_elevado">⚠️ ${esc(x)}</div>`).join('')}
+    <p class="sm"><b>Confirmados:</b></p><ul class="sm">${r.confirmados.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>
+    <p class="sm"><b>Calculados:</b></p><ul class="sm">${r.calculados.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>
+    <p class="sm"><b>Pendientes de verificación:</b></p><ul class="sm">${r.pendientes.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>
+  </details>`).join('')||'<p class="mut sm">Sin posiciones que validar.</p>'}</div>${DISC}`;
+}
+async function addPos(){
+  await api('/positions',{method:'POST',body:{ticker:$('#p-tk').value,name:$('#p-name').value,
+    qty:+$('#p-qty').value, avg_cost:$('#p-avg').value?+$('#p-avg').value:null,
+    invested:$('#p-inv').value?+$('#p-inv').value:null, source:$('#p-src').value||'manual'}});
+  cartera();
+}
+async function manualPrice(){
+  await api('/prices/manual',{method:'POST',body:{ticker:$('#mp-tk').value,price:+$('#mp-p').value,
+    asof:$('#mp-asof').value,source:$('#mp-src').value||'ingreso manual'}});
+  alert('Precio registrado con su fuente y fecha'); cartera();
+}
+
+/* ---------- Importador de CSV de Hapi (sin credenciales, se lee en el navegador) ---------- */
+let _csv=null;
+function csvSplit(line, delim){
+  const out=[]; let cur='', q=false;
+  for(let i=0;i<line.length;i++){ const c=line[i];
+    if(q){ if(c==='"'){ if(line[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=c; }
+    else { if(c==='"') q=true; else if(c===delim){ out.push(cur); cur=''; } else cur+=c; } }
+  out.push(cur); return out.map(s=>s.trim());
+}
+function csvNum(s){ if(s==null) return null; const c=String(s).replace(/[^0-9.\-]/g,''); const n=parseFloat(c); return isNaN(n)?null:n; }
+function csvGuess(headers, kws){ for(let i=0;i<headers.length;i++){ const h=headers[i].toLowerCase(); if(kws.some(k=>h.includes(k))) return i; } return -1; }
+function parseCsv(input){
+  const f=input.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>{
+    const text=String(rd.result).replace(/\r/g,'');
+    const lines=text.split('\n').filter(l=>l.trim()!=='');
+    if(lines.length<2){ $('#csv-map').innerHTML='<p class="sm warn">El archivo no tiene filas de datos.</p>'; return; }
+    const delim = lines[0].split(';').length > lines[0].split(',').length ? ';' : ',';
+    _csv = {headers: csvSplit(lines[0], delim), rows: lines.slice(1).map(l=>csvSplit(l, delim))};
+    renderCsvMap();
+  };
+  rd.readAsText(f);
+}
+function renderCsvMap(){
+  const h=_csv.headers;
+  const opt=(sel)=>h.map((x,i)=>`<option value="${i}" ${i===sel?'selected':''}>${esc(x||('columna '+(i+1)))}</option>`).join('');
+  const none='<option value="-1">— ninguna —</option>';
+  $('#csv-map').innerHTML=`
+   <p class="sm" style="margin-top:10px">Confirmá qué columna es cada dato (se detectaron automáticamente):</p>
+   <div class="grid g4">
+    <div><label>Ticker *</label><select id="m-tk">${opt(csvGuess(h,['ticker','symbol','simbolo','activo','instrument']))}</select></div>
+    <div><label>Cantidad *</label><select id="m-qty">${opt(csvGuess(h,['cantidad','qty','shares','acciones','units','particip','quantity']))}</select></div>
+    <div><label>Costo prom. (opcional)</label><select id="m-avg">${none}${opt(csvGuess(h,['costo','avg','promedio','average','precio prom','cost per']))}</select></div>
+    <div><label>Invertido (opcional)</label><select id="m-inv">${none}${opt(csvGuess(h,['invertido','invested','basis','aporte']))}</select></div>
+   </div>
+   <div class="row" style="margin-top:8px"><button onclick="previewCsv()">Previsualizar</button>
+     <span class="sm mut">${_csv.rows.length} fila(s) en el archivo</span></div>
+   <div id="csv-prev"></div>`;
+}
+function previewCsv(){
+  const iT=+$('#m-tk').value, iQ=+$('#m-qty').value, iA=+$('#m-avg').value, iI=+$('#m-inv').value;
+  const rows=_csv.rows.map(r=>({ ticker:String(r[iT]||'').toUpperCase().trim(), qty:csvNum(r[iQ]),
+    avg_cost: iA>=0?csvNum(r[iA]):null, invested: iI>=0?csvNum(r[iI]):null }))
+    .filter(x=>x.ticker && x.qty>0);
+  if(!rows.length){ $('#csv-prev').innerHTML='<p class="sm warn" style="margin-top:8px">Con ese mapeo no hay filas válidas (ticker + cantidad > 0). Revisá las columnas.</p>'; return; }
+  window._csvRows=rows;
+  $('#csv-prev').innerHTML=`<table style="margin-top:10px"><tr><th>Ticker</th><th>Cantidad</th><th>Costo prom.</th><th>Invertido</th></tr>
+    ${rows.map(x=>`<tr><td><b>${esc(x.ticker)}</b></td><td>${x.qty}</td><td>${x.avg_cost??'—'}</td><td>${x.invested??'—'}</td></tr>`).join('')}</table>
+    <div class="row" style="margin-top:8px"><button onclick="doImportCsv()">Importar ${rows.length} posición(es)</button>
+      <span class="sm mut">Entrarán marcadas «pendiente de verificación».</span></div>`;
+}
+async function doImportCsv(){
+  try{
+    const r=await api('/positions/import',{method:'POST',body:{rows:window._csvRows}});
+    alert(r.detail + (r.omitidas.length?`\n\nOmitidas ${r.omitidas.length} fila(s) por ticker o cantidad inválidos.`:''));
+    cartera();
+  }catch(e){ alert(e.detail||'Error al importar'); }
+}
+
+/* ---------- 3. Análisis y decisión (detalle del activo) ---------- */
+async function analisis(arg){
+  const pf = await api('/portfolio');
+  const tickers = pf.positions.map(p=>p.ticker);
+  const tk = (arg||tickers[0]||'').toUpperCase();
+  $('#view').innerHTML = `
+  <h2>Análisis y decisión</h2>
+  <p class="sub">Responde: qué ocurre, si la valoración es razonable, qué riesgos hay y qué alternativa conviene — con argumentos y supuestos visibles.</p>
+  <div class="card"><div class="row">
+    <select id="an-tk" style="width:140px">${tickers.map(t=>`<option ${t===tk?'selected':''}>${t}</option>`).join('')}</select>
+    <button onclick="runAnalysis()">Analizar</button>
+    <button class="sec" onclick="fundForm($('#an-tk').value)">Fundamentales…</button>
+    <span class="sm mut">Supuestos DCF:</span>
+    <label class="sm" style="margin:0">crec. 1-5a %</label><input id="as-g" style="width:70px" value="15">
+    <label class="sm" style="margin:0">descuento %</label><input id="as-r" style="width:70px" value="10">
+    <label class="sm" style="margin:0">terminal %</label><input id="as-t" style="width:70px" value="2.5">
+  </div></div>
+  <div id="an-out">${tk?'<p class="mut">Pulsa Analizar.</p>':'<p class="mut">Registra posiciones primero.</p>'}</div>${DISC}`;
+  if(arg) runAnalysis();
+}
+async function runAnalysis(){
+  const tk = $('#an-tk').value;
+  $('#an-out').innerHTML = '<p class="mut">Analizando (obteniendo histórico de la fuente)…</p>';
+  const r = await api('/analysis/'+tk,{method:'POST',body:{assumptions:{
+    growth_1_5_pct:+$('#as-g').value, discount_rate_pct:+$('#as-r').value, terminal_growth_pct:+$('#as-t').value}}});
+  const d = r.decision, sc = r.valoracion.escenarios, tec = r.situacion_tecnica||{};
+  const scoreRow = Object.entries(r.analisis_fundamental.scores||{}).map(([k,v])=>
+    `<tr><td>${k.replaceAll('_',' ')}</td><td>${v.score==null?'<span class="pill warn">falta dato</span>':`<b>${v.score}</b>/10`}</td><td class="sm mut">${esc(v.reason)}</td></tr>`).join('');
+  $('#an-out').innerHTML = `
+  <div class="card"><h3>${r.ticker} — ${esc(r.empresa)} <span class="sm mut">(${r.fecha_hora.replace('T',' ')})</span></h3>
+    <div class="row sm">
+      <span>Precio: <b>$ ${fmt(r.precio_actual.valor)}</b> <span class="pill ${r.precio_actual.estado==='actual'?'ok':'warn'}">${esc(r.precio_actual.estado)}</span>
+      <span class="mut">${esc(r.precio_actual.fuente||'')} ${esc(r.precio_actual.asof||'')}</span></span>
+      <span>· Cantidad ${r.cantidad} · Valor $ ${fmt(r.valor_total)} · Costo prom. $ ${fmt(r.costo_promedio)}
+      · Resultado <span class="${cls(r.resultado)}">$ ${fmt(r.resultado)}</span> · Peso ${fmt(r.peso_en_cartera_pct,1)} %</span>
+    </div></div>
+  <div class="card" style="border-left:5px solid var(--acc)">
+    <h3>Decisión propuesta: <span class="pill">${esc(d.decision_propuesta.replaceAll('_',' '))}</span>
+     <span class="pill ${d.nivel_confianza==='baja'?'warn':'ok'}">confianza ${d.nivel_confianza}</span></h3>
+    <p class="sm"><b>Pregunta obligatoria:</b> ${esc(d.pregunta_obligatoria)}</p>
+    <ul class="sm">${d.argumentos.map(a=>`<li>${esc(a)}</li>`).join('')}</ul>
+    <div class="row">
+      ${['comprar','agregar_gradualmente','mantener','reducir','vender','esperar'].map(a=>
+        `<button class="mini sec" onclick="recordDecision(${r.decision_id},'${a}')">Registrar: ${a.replaceAll('_',' ')}</button>`).join('')}
+    </div>
+    <p class="sm mut" style="margin-top:6px">${esc(d.nota)} Próxima revisión: ${esc(r.proxima_revision)}.</p></div>
+  ${d.checklist_promediar?`<div class="card"><h3>Checklist antes de promediar a la baja</h3>
+    ${d.checklist_promediar.map(c=>`<div class="qbox"><b>${esc(c.pregunta)}</b><br>${esc(c.respuesta)}</div>`).join('')}</div>`:''}
+  <div class="grid g2">
+  <div class="card"><h3>Alternativas comparadas</h3>
+    ${Object.entries(d.alternativas).filter(([k,v])=>v.a_favor.length||v.en_contra.length||v.condiciones.length).map(([k,v])=>`
+      <details><summary>${k.replaceAll('_',' ')}</summary>
+      ${v.a_favor.map(x=>`<div class="sm">✅ ${esc(x)}</div>`).join('')}
+      ${v.en_contra.map(x=>`<div class="sm">❌ ${esc(x)}</div>`).join('')}
+      ${v.condiciones.map(x=>`<div class="sm">📌 ${esc(x)}</div>`).join('')}</details>`).join('')}</div>
+  <div class="card"><h3>Valoración por escenarios (DCF)</h3>
+    ${r.valoracion.calculable? `<table><tr><th>Escenario</th><th>Valor/acción</th><th>Margen seg.</th></tr>
+      ${Object.entries(sc).map(([k,v])=>`<tr><td>${k}</td><td>$ ${fmt(v.valor_estimado_por_accion)}</td>
+        <td class="${cls(v.margen_de_seguridad_pct)}">${fmt(v.margen_de_seguridad_pct,1)} %</td></tr>`).join('')}</table>
+      <details><summary class="sm">Supuestos del escenario base (modificables arriba)</summary>
+      <pre>${esc(JSON.stringify(sc.base.supuestos,null,1))}</pre></details>`
+     :`<p class="sm warn">No calculable: ${r.valoracion.faltantes.map(esc).join('; ')}.</p>`}
+    <p class="sm mut">${esc(r.valoracion.nota)}</p>
+    <h3>Múltiplos</h3>
+    ${Object.keys(r.multiplos.multiples).length?`<table>${Object.entries(r.multiplos.multiples).map(([k,v])=>`<tr><td>${k}</td><td><b>${v}</b></td></tr>`).join('')}</table>`:''}
+    ${r.multiplos.missing.length?`<p class="sm mut">Faltan: ${r.multiplos.missing.map(esc).join('; ')}</p>`:''}
+  </div></div>
+  <div class="grid g2">
+  <div class="card"><h3>Análisis fundamental</h3><table>${scoreRow}</table>
+    <p class="sm mut">${esc(r.analisis_fundamental.nota||'')}</p>
+    <p class="sm">Fuente de fundamentales: ${esc(r.calidad_de_datos.fundamentales_fuente||'no registrados')} ${r.calidad_de_datos.fundamentales_asof?`(${esc(r.calidad_de_datos.fundamentales_asof)})`:''}</p></div>
+  <div class="card"><h3>Situación técnica (complementaria)</h3>
+    ${tec.error?`<p class="sm warn">${esc(tec.error)}</p>`:`
+    <table>
+      <tr><td>Tendencia</td><td><b>${esc(tec.tendencia||'—')}</b></td></tr>
+      <tr><td>SMA50 / SMA200</td><td>${fmt(tec.sma50)} / ${fmt(tec.sma200)}</td></tr>
+      <tr><td>RSI(14)</td><td>${tec.rsi14??'—'}</td></tr>
+      <tr><td>Distancia al máx. del periodo</td><td>${fmt(tec.distancia_a_maximo_pct,1)} %</td></tr>
+      <tr><td>Volatilidad anualizada</td><td>${fmt(tec.volatilidad_anualizada_pct,1)} %</td></tr>
+      <tr><td>Caída máx. del periodo</td><td>${fmt(tec.caida_maxima_periodo_pct,1)} %</td></tr>
+      <tr><td>Soporte / resistencia aprox.</td><td>${fmt(tec.soporte_aproximado)} / ${fmt(tec.resistencia_aproximada)}</td></tr>
+    </table><p class="sm mut">${esc(tec.nota||'')} Fuente: ${esc(tec.fuente||'')}</p>`}</div>
+  </div>`;
+}
+async function recordDecision(id,choice){
+  const ok = confirm(`Vas a registrar tu decisión: «${choice.replaceAll('_',' ')}».\nRecuerda: la ejecución la haces tú en Hapi; esta app nunca opera por ti. ¿Confirmas el registro?`);
+  if(!ok) return;
+  const r = await api(`/decisions/${id}/record`,{method:'POST',body:{choice,authorized:true}});
+  alert(r.detail);
+}
+async function fundForm(tk){
+  const f = await api('/fundamentals/'+tk);
+  const cur = f.fundamentals;
+  $('#an-out').innerHTML = `
+  <div class="card"><h3>Fundamentales de ${tk}</h3>
+  <p class="sub">Ingresa datos del último informe (10-K/10-Q o resumen del bróker). Fuente y fecha obligatorias; sin datos el sistema no inventa nada.</p>
+  <div class="grid g3">
+  ${f.fields.map(([k,label])=>`<div><label>${esc(label)}</label><input id="f-${k}" value="${esc(cur[k]??'')}"></div>`).join('')}
+  </div>
+  <div class="grid g2" style="margin-top:8px">
+    <div><label>Fuente (obligatoria)</label><input id="f-source" value="${esc(f.source||'')}" placeholder="p. ej. informe 10-K FY2026, ir.nvidia.com"></div>
+    <div><label>Fecha del dato (obligatoria)</label><input id="f-asof" value="${esc(f.asof||'')}" placeholder="2026-05-28"></div>
+  </div>
+  <button style="margin-top:10px" onclick="saveFund('${tk}',${JSON.stringify(f.fields.map(x=>x[0]))
+    .replaceAll('"',"'")})">Guardar fundamentales</button></div>`;
+}
+async function saveFund(tk, keys){
+  const data = {};
+  keys.forEach(k=>{ const v=$('#f-'+k).value.trim(); if(v!=='') data[k]=isNaN(+v)?v:+v; });
+  try{
+    await api('/fundamentals/'+tk,{method:'PUT',body:{data,source:$('#f-source').value,asof:$('#f-asof').value}});
+    alert('Guardado. Vuelve a Analizar.'); analisis(tk);
+  }catch(e){ alert(e.detail||'Error'); }
+}
+
+/* ---------- 4. Comparador ---------- */
+async function comparador(){
+  const pf = await api('/portfolio');
+  $('#view').innerHTML = `
+  <h2>Comparador de alternativas</h2>
+  <p class="sub">Genera el análisis de cada posición y compara las decisiones propuestas lado a lado.</p>
+  <div class="card"><button onclick="runCompare()">Comparar todas las posiciones</button></div>
+  <div id="cmp-out"></div>${DISC}`;
+}
+async function runCompare(){
+  const pf = await api('/portfolio');
+  $('#cmp-out').innerHTML = '<p class="mut">Analizando todas las posiciones…</p>';
+  const results = [];
+  for(const p of pf.positions){
+    try{ results.push(await api('/analysis/'+p.ticker,{method:'POST',body:{}})); }
+    catch(e){ results.push({ticker:p.ticker, error:e.detail}); }
+  }
+  $('#cmp-out').innerHTML = `<div class="card"><table>
+    <tr><th>Ticker</th><th>Peso</th><th>Resultado</th><th>Margen seg. (base)</th><th>Decisión propuesta</th><th>Confianza</th><th>Argumento principal</th></tr>
+    ${results.map(r=> r.error? `<tr><td>${r.ticker}</td><td colspan="6" class="warn sm">${esc(r.error)}</td></tr>` : `<tr>
+      <td><a href="#analisis/${r.ticker}"><b>${r.ticker}</b></a></td>
+      <td>${fmt(r.peso_en_cartera_pct,1)} %</td>
+      <td class="${cls(r.resultado)}">$ ${fmt(r.resultado)}</td>
+      <td>${r.valoracion.calculable? fmt(r.valoracion.escenarios.base.margen_de_seguridad_pct,1)+' %':'<span class="pill warn">faltan datos</span>'}</td>
+      <td><span class="pill">${esc(r.decision.decision_propuesta.replaceAll('_',' '))}</span></td>
+      <td>${esc(r.decision.nivel_confianza)}</td>
+      <td class="sm mut">${esc((r.decision.argumentos[0]||'').slice(0,120))}</td></tr>`).join('')}
+  </table></div>`;
+}
+
+/* ---------- 5. Simulador ---------- */
+async function simulador(){
+  const pf = await api('/portfolio');
+  $('#view').innerHTML = `
+  <h2>Simulador de escenarios</h2>
+  <p class="sub">Simulación aritmética sobre tus datos. No es una predicción; los supuestos siempre se muestran.</p>
+  <div class="card"><h3>Variaciones de precio</h3>
+    ${pf.positions.map(p=>`<div class="row"><span style="width:60px"><b>${p.ticker}</b></span>
+      <input id="sim-${p.ticker}" type="number" style="width:110px" placeholder="%" value="0"> <span class="sm mut">% de variación</span></div>`).join('')}
+    <h3 style="margin-top:12px">Operación simulada (opcional)</h3>
+    <div class="row">
+      <select id="sim-side" style="width:120px"><option value="">ninguna</option><option value="comprar">comprar</option><option value="vender">vender</option></select>
+      <input id="sim-tk" placeholder="Ticker" style="width:100px">
+      <input id="sim-amt" type="number" placeholder="USD" style="width:110px">
+      <span class="sm mut">Efectivo disponible: $ ${fmt(pf.cash)}</span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button onclick="runSim()">Simular</button>
+      <button class="mini sec" onclick="preset(-10)">Todos −10%</button>
+      <button class="mini sec" onclick="preset(-20)">−20%</button>
+      <button class="mini sec" onclick="preset(-30)">−30%</button>
+      <button class="mini sec" onclick="preset(15)">Recuperación +15%</button>
+    </div></div>
+  <div id="sim-out"></div>${DISC}`;
+  window._simTk = pf.positions.map(p=>p.ticker);
+}
+function preset(v){ window._simTk.forEach(t=>{ $('#sim-'+t).value=v; }); runSim(); }
+async function runSim(){
+  const changes = {}; window._simTk.forEach(t=>{ const v=+$('#sim-'+t).value; if(v) changes[t]=v; });
+  const trades = [];
+  if($('#sim-side').value && $('#sim-tk').value && +$('#sim-amt').value)
+    trades.push({ticker:$('#sim-tk').value, side:$('#sim-side').value, amount_usd:+$('#sim-amt').value});
+  const r = await api('/simulate',{method:'POST',body:{changes,trades}});
+  $('#sim-out').innerHTML = `<div class="card"><h3>Resultado simulado</h3>
+    <div class="grid g3">
+      <div><div class="mut sm">Valor final estimado</div><div class="big">$ ${fmt(r.valor_final_estimado)}</div></div>
+      <div><div class="mut sm">Efectivo final</div><div class="big">$ ${fmt(r.efectivo_final)}</div></div>
+      <div><div class="mut sm">HHI resultante</div><div class="big">${r.hhi_resultante}</div></div>
+    </div>
+    <p class="sm"><b>Concentración resultante:</b> ${r.concentracion_resultante.map(w=>`${w.ticker} ${w.peso_pct}%`).join(' · ')||'—'}</p>
+    <p class="sm"><b>Supuestos aplicados:</b></p><ul class="sm">${r.supuestos.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>
+    <p class="sm mut">${esc(r.nota)}</p></div>`;
+}
+
+/* ---------- 6. Oportunidades ---------- */
+async function oportunidades(){
+  const r = await api('/candidates');
+  $('#view').innerHTML = `
+  <h2>Buscador de oportunidades</h2>
+  <p class="sub">${esc(r.nota)}</p>
+  <div class="card"><h3>Agregar candidato (con tus datos y fuente)</h3>
+    <div class="grid g3">
+      <div><label>Ticker</label><input id="c-tk"></div>
+      <div><label>Nombre</label><input id="c-name"></div>
+      <div><label>Fuente de tus datos (obligatoria)</label><input id="c-src" placeholder="p. ej. 10-K + análisis propio"></div>
+      ${['calidad','crecimiento','valoracion','margen_seguridad','solidez','riesgo'].map(k=>
+        `<div><label>${k.replaceAll('_',' ')} (0–10)</label><input id="c-${k}" type="number" min="0" max="10"></div>`).join('')}
+    </div>
+    <label>Tesis</label><textarea id="c-tesis"></textarea>
+    <div class="grid g3">
+      <div><label>Catalizadores</label><input id="c-cat"></div>
+      <div><label>Condición de entrada</label><input id="c-ent"></div>
+      <div><label>Condición de invalidación</label><input id="c-inv"></div>
+    </div>
+    <button style="margin-top:10px" onclick="addCand()">Agregar al ranking</button></div>
+  <div class="card"><h3>Ranking (${r.candidates.length})</h3>
+    <table><tr><th>#</th><th>Ticker</th><th>Puntaje</th><th>Tesis</th><th>Condiciones</th><th>Fuente</th><th></th></tr>
+    ${r.candidates.map((c,i)=>`<tr><td>${i+1}</td><td><b>${c.ticker}</b><br><span class="sm mut">${esc(c.name||'')}</span></td>
+      <td><b>${c.ranking_score??'—'}</b></td>
+      <td class="sm">${esc(c.data.tesis||'')}</td>
+      <td class="sm">entrada: ${esc(c.data.condicion_entrada||'—')}<br>invalida: ${esc(c.data.condicion_invalidacion||'—')}</td>
+      <td class="sm mut">${esc(c.source)}</td>
+      <td><button class="mini danger" onclick="delCand(${c.id})">✕</button></td></tr>`).join('')}
+    </table>
+    <p class="sm mut">Compara contra tus posiciones actuales en el Comparador antes de sustituir.</p></div>${DISC}`;
+}
+async function delCand(id){ await api('/candidates/'+id,{method:'DELETE'}); oportunidades(); }
+async function addCand(){
+  const data = {tesis:$('#c-tesis').value, catalizadores:$('#c-cat').value,
+    condicion_entrada:$('#c-ent').value, condicion_invalidacion:$('#c-inv').value};
+  ['calidad','crecimiento','valoracion','margen_seguridad','solidez','riesgo'].forEach(k=>{
+    const v=$('#c-'+k).value; if(v!=='') data[k]=+v; });
+  try{
+    await api('/candidates',{method:'POST',body:{ticker:$('#c-tk').value,name:$('#c-name').value,source:$('#c-src').value,data}});
+    oportunidades();
+  }catch(e){ alert(e.detail||'Error'); }
+}
+
+/* ---------- 7. Alertas ---------- */
+async function alertasView(){
+  const r = await api('/alerts');
+  $('#view').innerHTML = `
+  <h2>Alertas</h2><p class="sub">Clasificadas: informativa · revisión necesaria · riesgo elevado · acción pendiente · dato no verificado. Sin ruido por movimientos diarios irrelevantes (&lt;5%).</p>
+  ${r.alerts.length? r.alerts.map(a=>`<div class="alert ${a.level}"><span class="pill mut">${esc(a.level.replaceAll('_',' '))}</span> ${esc(a.text)}</div>`).join('')
+   :'<div class="card"><p class="mut">Sin alertas activas.</p></div>'}${DISC}`;
+}
+
+/* ---------- 8. Diario ---------- */
+async function diario(){
+  const r = await api('/journal');
+  $('#view').innerHTML = `
+  <h2>Diario de inversión</h2>
+  <p class="sub">Registra la tesis ANTES de operar y evalúa DESPUÉS el proceso, no solo el resultado: una decisión puede ser correcta y perder dinero (y viceversa).</p>
+  <div class="card"><h3>Nueva entrada</h3>
+    <div class="grid g3">
+      <div><label>Ticker</label><input id="j-tk"></div>
+      <div><label>Acción</label><select id="j-act">${['revision','comprar','agregar','reducir','vender','esperar'].map(a=>`<option>${a}</option>`).join('')}</select></div>
+      <div><label>Fecha de revisión de la tesis</label><input id="j-rev" type="date"></div>
+    </div>
+    <div class="grid g2">
+      <div><label>Motivo *</label><textarea id="j-motivo"></textarea></div>
+      <div><label>Tesis *</label><textarea id="j-tesis"></textarea></div>
+      <div><label>Riesgos *</label><textarea id="j-riesgos"></textarea></div>
+      <div><label>Condición de invalidación *</label><textarea id="j-inv"></textarea></div>
+    </div>
+    <div class="grid g3">
+      <div><label>Precio</label><input id="j-precio" type="number" step="any"></div>
+      <div><label>Horizonte</label><input id="j-hor"></div>
+      <div><label>Catalizadores</label><input id="j-cat"></div>
+      <div><label>Condiciones de salida</label><input id="j-sal"></div>
+      <div><label>Pérdida tolerable</label><input id="j-perd"></div>
+      <div><label>Tamaño de posición</label><input id="j-tam"></div>
+      <div><label>Estado emocional</label><input id="j-emo" placeholder="tranquilo / FOMO / miedo…"></div>
+      <div><label>Fuentes consultadas</label><input id="j-fue"></div>
+    </div>
+    <button style="margin-top:10px" onclick="addJournal()">Registrar</button>
+    <p class="sm mut">* obligatorios si la acción es una operación (comprar/vender/agregar/reducir).</p></div>
+  ${r.entries.map(e=>`<div class="card"><h3>${esc(e.ticker||'cartera')} · ${esc(e.action)} <span class="sm mut">${e.created_at.slice(0,10)}</span>
+    ${e.evaluation?'<span class="pill ok">evaluada</span>':(e.review_date?`<span class="pill warn">revisar ${e.review_date}</span>`:'')}</h3>
+    <p class="sm"><b>Tesis:</b> ${esc(e.data.tesis||'—')} · <b>Riesgos:</b> ${esc(e.data.riesgos||'—')} · <b>Invalidación:</b> ${esc(e.data.condicion_invalidacion||'—')}</p>
+    ${e.evaluation? `<p class="sm"><b>Evaluación:</b> ${esc(e.evaluation.que_ocurrio||'')} · proceso/suerte: ${esc(e.evaluation.suerte_o_proceso||'')} · lección: ${esc(e.evaluation.leccion||'')}</p>`
+     : `<details><summary class="sm">Evaluar ahora</summary>
+        <div class="grid g3">
+        <div><label>¿Qué ocurrió?</label><input id="ev-que-${e.id}"></div>
+        <div><label>¿Tesis correcta?</label><select id="ev-tesis-${e.id}"><option>sí</option><option>no</option><option>parcialmente</option></select></div>
+        <div><label>¿Suerte o proceso?</label><select id="ev-sp-${e.id}"><option>proceso</option><option>suerte</option><option>mala suerte con buen proceso</option><option>mal proceso</option></select></div>
+        <div><label>¿Hubo FOMO?</label><select id="ev-fomo-${e.id}"><option>no</option><option>sí</option></select></div>
+        <div><label>¿Se vendió por miedo?</label><select id="ev-miedo-${e.id}"><option>no</option><option>sí</option></select></div>
+        <div><label>Lección</label><input id="ev-lec-${e.id}"></div></div>
+        <button class="mini" style="margin-top:8px" onclick="evalJournal(${e.id})">Guardar evaluación</button></details>`}
+  </div>`).join('')}${DISC}`;
+}
+async function addJournal(){
+  try{
+    await api('/journal',{method:'POST',body:{ticker:$('#j-tk').value,action:$('#j-act').value,
+      motivo:$('#j-motivo').value,tesis:$('#j-tesis').value,riesgos:$('#j-riesgos').value,
+      condicion_invalidacion:$('#j-inv').value,precio:$('#j-precio').value?+$('#j-precio').value:null,
+      horizonte:$('#j-hor').value,catalizadores:$('#j-cat').value,condiciones_salida:$('#j-sal').value,
+      perdida_tolerable:$('#j-perd').value,tamano_posicion:$('#j-tam').value,
+      estado_emocional:$('#j-emo').value,fuentes:$('#j-fue').value,review_date:$('#j-rev').value}});
+    diario();
+  }catch(e){ alert(e.detail||'Error'); }
+}
+async function evalJournal(id){
+  await api(`/journal/${id}/evaluate`,{method:'POST',body:{
+    que_ocurrio:$('#ev-que-'+id).value, tesis_correcta:$('#ev-tesis-'+id).value,
+    suerte_o_proceso:$('#ev-sp-'+id).value, hubo_fomo:$('#ev-fomo-'+id).value,
+    vendio_por_miedo:$('#ev-miedo-'+id).value, leccion:$('#ev-lec-'+id).value}});
+  diario();
+}
+
+/* ---------- 9. Historial ---------- */
+async function historial(){
+  const [d, a] = await Promise.all([api('/decisions'), api('/audit')]);
+  $('#view').innerHTML = `
+  <h2>Historial</h2><p class="sub">Decisiones propuestas vs. registradas, y registro de auditoría completo.</p>
+  <div class="card"><h3>Decisiones (${d.decisions.length})</h3>
+    <table><tr><th>Fecha</th><th>Ticker</th><th>Propuesta</th><th>Tu decisión</th><th>Contexto</th></tr>
+    ${d.decisions.map(x=>`<tr><td class="sm">${x.created_at.slice(0,16).replace('T',' ')}</td><td><b>${x.ticker}</b></td>
+      <td><span class="pill">${esc(x.proposal.decision)}</span> <span class="sm mut">conf. ${esc(x.proposal.confianza)}</span></td>
+      <td>${x.user_choice?`<b>${esc(x.user_choice)}</b>`:'<span class="mut sm">sin registrar</span>'}</td>
+      <td class="sm mut">peso ${fmt(x.proposal.peso,1)}% · margen ${x.proposal.margen_seguridad==null?'s/d':fmt(x.proposal.margen_seguridad,1)+'%'}</td></tr>`).join('')}</table></div>
+  <div class="card"><h3>Auditoría</h3>
+    <table>${a.log.slice(0,40).map(l=>`<tr><td class="sm">${l.at.slice(0,16).replace('T',' ')}</td>
+      <td><span class="pill mut">${esc(l.action)}</span></td><td class="sm mut">${esc(l.detail||'')}</td></tr>`).join('')}</table></div>${DISC}`;
+}
+
+/* ---------- 10. Perfil de riesgo ---------- */
+const PROFILE_LABELS = {capital_total:'Capital total (USD)',capital_disponible:'Capital disponible para invertir',
+  aporte_mensual:'Aporte mensual',fondo_emergencia:'¿Tienes fondo de emergencia? (sí/no/meses)',moneda:'Moneda principal',
+  horizonte_anios:'Horizonte de inversión (años)',objetivo:'Objetivo financiero',rentabilidad_esperada_pct:'Rentabilidad esperada %',
+  perdida_maxima_pct:'Pérdida máxima tolerable %',necesita_retirar:'¿Necesitarás retirar el dinero? (cuándo)',
+  experiencia:'Experiencia invirtiendo',nivel_riesgo:'Nivel de riesgo (conservador/moderado/agresivo)',
+  ingresos_estables:'Ingresos y estabilidad financiera',max_por_empresa_pct:'Máximo % por empresa',
+  max_por_sector_pct:'Máximo % por sector',prefiere_fondos:'¿Prefieres acciones o fondos diversificados?',
+  restricciones:'Restricciones personales',comisiones_impuestos:'Comisiones e impuestos aplicables'};
+async function perfil(){
+  const r = await api('/profile');
+  $('#view').innerHTML = `
+  <h2>Perfil de riesgo del inversionista</h2>
+  <p class="sub">${r.complete?'✅ Perfil completo: las recomendaciones pueden personalizarse.':'⚠️ Perfil incompleto: los análisis serán informativos, no recomendaciones personalizadas.'}</p>
+  <div class="card"><div class="grid g3">
+    ${r.fields.map(f=>`<div><label>${PROFILE_LABELS[f]||f}</label><input id="rp-${f}" value="${esc(r.profile[f]??'')}"></div>`).join('')}
+  </div><button style="margin-top:12px" onclick="saveProfile()">Guardar perfil</button></div>${DISC}`;
+  window._rpFields = r.fields;
+}
+async function saveProfile(){
+  const body = {}; window._rpFields.forEach(f=>{ body[f]=$('#rp-'+f).value; });
+  const r = await api('/profile',{method:'PUT',body});
+  alert(r.complete?'Perfil completo ✅':'Guardado. Faltan: '+r.missing.join(', ')); perfil();
+}
+
+/* ---------- 11. Configuración (límites de riesgo) ---------- */
+const LIMIT_LABELS = {max_position_pct:'Máximo % por empresa',max_sector_pct:'Máximo % por sector',
+  max_trade_pct:'Máximo % por operación',max_tolerable_loss_pct:'Pérdida máxima tolerable %',
+  min_cash_reserve:'Reserva mínima de efectivo (USD)',max_trades_per_month:'Máx. operaciones al mes'};
+async function config(){
+  const s = await api('/settings');
+  $('#view').innerHTML = `
+  <h2>Configuración</h2><p class="sub">Reglas de riesgo que alimentan alertas y el motor de decisiones.</p>
+  <div class="card"><h3>Límites de riesgo</h3><div class="grid g3">
+    ${Object.entries(s.limits).map(([k,v])=>`<div><label>${LIMIT_LABELS[k]||k}</label><input id="lm-${k}" type="number" step="any" value="${v}"></div>`).join('')}
+  </div><button style="margin-top:12px" onclick="saveLimits(${JSON.stringify(Object.keys(s.limits)).replaceAll('"',"'")})">Guardar límites</button></div>
+  <div class="card"><h3 style="color:var(--err)">Zona de peligro</h3>
+    <p class="sm">Elimina posiciones, fundamentales, diario, decisiones, candidatos y auditoría.</p>
+    <button class="danger" onclick="wipe()">Eliminar todos mis datos</button></div>${DISC}`;
+}
+async function saveLimits(keys){
+  const body={}; keys.forEach(k=>{ body[k]=+$('#lm-'+k).value; });
+  await api('/limits',{method:'PUT',body}); alert('Límites guardados'); config();
+}
+async function wipe(){
+  if(prompt('Irreversible. Escribe ELIMINAR:')==='ELIMINAR'){
+    await api('/settings/delete_all',{method:'POST',body:{confirm:'ELIMINAR'}}); alert('Datos eliminados'); route();
+  }
+}
+
+api('/me').then(showApp).catch(showLogin);
+</script>
+</body>
+</html>
