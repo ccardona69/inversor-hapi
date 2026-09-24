@@ -181,13 +181,14 @@ def simulate(positions: list, cash: float, changes: dict, trades: list) -> dict:
             assumptions.append(f"{tk}: variación simulada de {float(pct):+.1f}%")
     final_positions = [p for p in sim.values() if (p.get("market_value") or 0) > 0.005]
     total = sum(p["market_value"] for p in final_positions) + sim_cash
+    costs_complete = all(p.get("invested") is not None for p in final_positions)
     invested = sum(p.get("invested") or 0 for p in final_positions)
     weights = [{"ticker": p["ticker"], "peso_pct": round(p["market_value"] / total * 100, 2)}
                for p in final_positions] if total > 0 else []
     hhi = round(sum(w["peso_pct"] ** 2 for w in weights)) if weights else 0
     return {
         "valor_final_estimado": round(total, 2), "efectivo_final": round(sim_cash, 2),
-        "resultado_vs_invertido": round(total - invested - sim_cash, 2) if invested else None,
+        "resultado_vs_invertido": round(total - invested - sim_cash, 2) if invested and costs_complete else None,
         "concentracion_resultante": weights, "hhi_resultante": hhi,
         "supuestos": assumptions or ["Sin cambios aplicados"],
         "nota": "Simulación aritmética sobre tus datos; no es una predicción de mercado.",

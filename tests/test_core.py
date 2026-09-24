@@ -4,6 +4,7 @@ Las pruebas no dependen de la red: los precios se ingresan manualmente
 (el fetch de Yahoo se prueba por separado y de forma tolerante a fallos).
 """
 import os
+import json
 import tempfile
 from datetime import datetime, timezone, timedelta
 
@@ -16,6 +17,7 @@ from app import analysis as AN
 from app import risk as RK
 from app import decisions as DE
 from app import marketdata as MD
+from app import photosync as PS
 from app.main import app
 
 client = TestClient(app)
@@ -125,11 +127,11 @@ def test_portfolio_seed_and_validation(session):
     pf = c.get("/api/portfolio").json()
     assert {p["ticker"] for p in pf["positions"]} == {"NVDA", "MSFT"}
     assert abs(pf["totals"]["invertido"] - 453.81) < 0.01
-    assert abs(pf["totals"]["valor_actual"] - 420.68) < 0.01
-    assert abs(pf["totals"]["resultado"] - (-33.13)) < 0.01
-    # sin precio de mercado, el valor sale de la captura y así se declara
+    assert pf["totals"]["valor_actual"] is None and pf["totals"]["resultado"] is None
+    assert set(pf["totals"]["sin_precio_vigente"]) == {"NVDA", "MSFT"}
+    # La foto conserva los valores por fila, pero no se suman como valor actual.
     nvda = next(p for p in pf["positions"] if p["ticker"] == "NVDA")
-    assert "verificar" in nvda["price_info"]["fuente"]
+    assert nvda["hapi_value"] == 313.49 and "verificar" in nvda["price_info"]["fuente"]
 
     val = c.get("/api/validate").json()["report"]
     nvda_v = next(r for r in val if r["ticker"] == "NVDA")
@@ -244,6 +246,112 @@ def test_import_csv_positions(session):
     assert abs(aapl["invested"] - 300.0) < 0.01  # 2 × 150, derivado por position_upsert
     # sin filas: error claro
     assert c.post("/api/positions/import", json={"rows": []}).status_code == 400
+
+
+# ---------- sincronización por foto (IA de visión) ----------
+
+LUNA_TEST_ENV = {  # configuración de prueba: Azure Foundry estilo Responses
+    "INVERSOR_AI_API_KEY": "clave-de-prueba", "INVERSOR_AI_MODEL": "gpt-5.6-luna",
+    "INVERSOR_AI_BASE_URL": "https://recurso.services.ai.azure.com/foundry/openai/v1",
+    "INVERSOR_AI_API_STYLE": "responses",
+}
+
+
+class _FakeResp:
+    def __init__(self, payload, status=200):
+        self._payload = payload
+        self.status_code = status
+        self.text = json.dumps(payload)
+    def json(self):
+        return self._payload
+
+
+class _FakeClient:
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = []
+    def post(self, url, headers=None, json=None):
+        self.calls.append({"url": url, "headers": headers, "body": json})
+        return _FakeResp(self.payload)
+
+
+def test_photosync_normalize_rows():
+    rows, omitidas = PS.normalize_rows([
+        {"ticker": "nvda", "qty": "1.54575", "avg_cost": "216.96", "value": 313.49,
+         "pl": "-21.88", "pl_pct": "no visible", "invested": None},
+        {"ticker": "", "qty": 5},                          # omitida: sin ticker
+        {"ticker": "MSFT", "qty": 0},                      # omitida: cantidad 0
+        "texto suelto",                                    # omitida: no es fila
+    ])
+    assert len(rows) == 1 and len(omitidas) == 3
+    r = rows[0]
+    assert r["ticker"] == "NVDA" and r["qty"] == 1.54575
+    assert r["hapi_pl"] == -21.88 and r["hapi_value"] == 313.49
+    assert r["invested"] is None and r["hapi_return_pct"] is None  # lo no visible no se inventa
+
+
+def test_photosync_analyze_responses_style():
+    reply = json.dumps({"posiciones": [
+        {"ticker": "NVDA", "name": "NVIDIA", "qty": 1.54575, "avg_cost": 216.96,
+         "invested": 335.37, "value": 313.49, "pl": -21.88, "pl_pct": -6.52}]})
+    # dentro de un fence markdown, como suelen responder los modelos
+    fake = _FakeClient({"output": [{"content": [{"type": "output_text",
+                                                 "text": "```json\n" + reply + "\n```"}]}]})
+    out = PS.analyze("falsobase64", "image/jpeg", env=LUNA_TEST_ENV, client=fake)
+    assert out["rows"][0]["ticker"] == "NVDA" and out["model"] == "gpt-5.6-luna"
+    assert out["cash"] is None
+    call = fake.calls[0]
+    assert call["url"].endswith("/foundry/openai/v1/responses")
+    assert call["headers"]["api-key"] == "clave-de-prueba"
+    cuerpo = call["body"]
+    assert cuerpo["max_output_tokens"] == 2048
+    assert cuerpo["input"][0]["content"][1]["type"] == "input_image"
+    assert cuerpo["input"][0]["content"][1]["image_url"].startswith("data:image/jpeg;base64,")
+    assert "image_url" in cuerpo["input"][0]["content"][1]
+
+
+def test_photosync_analyze_chat_style_and_errors():
+    reply = json.dumps({"posiciones": []})
+    fake = _FakeClient({"choices": [{"message": {"content": reply}}]})
+    env = dict(LUNA_TEST_ENV, INVERSOR_AI_API_STYLE="chat",
+               INVERSOR_AI_BASE_URL="https://recurso.openai.azure.com")
+    out = PS.analyze("falsobase64", "image/jpeg", env=env, client=fake)
+    assert out["rows"] == []
+    url = fake.calls[0]["url"]
+    assert "/openai/deployments/gpt-5.6-luna/chat/completions" in url and "api-version=" in url
+    # sin configuración, error claro (no se intenta la red)
+    with pytest.raises(PS.PhotoSyncError):
+        PS.analyze("x", "image/jpeg", env={}, client=fake)
+    # respuesta sin JSON interpretable
+    malo = _FakeClient({"output": [{"content": [{"type": "output_text", "text": "no soy json"}]}]})
+    with pytest.raises(PS.PhotoSyncError):
+        PS.analyze("x", "image/jpeg", env=LUNA_TEST_ENV, client=malo)
+
+
+def test_photo_endpoints(session, monkeypatch):
+    c = session
+    # estado: la configuración de prueba no debe filtrarse
+    st = c.get("/api/hapi/photo/status").json()
+    assert "configured" in st and "api_key" not in json.dumps(st)
+    # analizar: imagen vacía -> 400; fallo de la IA -> 502; éxito -> filas
+    assert c.post("/api/hapi/photo/analyze", json={}).status_code == 400
+    monkeypatch.setattr(PS, "analyze", lambda *a, **k: (_ for _ in ()).throw(PS.PhotoSyncError("boom")))
+    assert c.post("/api/hapi/photo/analyze", json={"image_b64": "abc"}).status_code == 502
+    rows = [{"ticker": "KO", "name": "Coca-Cola (prueba)", "qty": 3, "avg_cost": 60.0,
+             "invested": 180.0, "hapi_value": 192.0, "hapi_pl": 12.0, "hapi_return_pct": 6.67},
+            {"ticker": "", "qty": 2}]
+    monkeypatch.setattr(PS, "analyze", lambda *a, **k: {"rows": rows, "omitted": [], "cash": 173.35, "model": "prueba"})
+    r = c.post("/api/hapi/photo/analyze", json={"image_b64": "abc"})
+    assert r.status_code == 200 and r.json()["rows"][0]["ticker"] == "KO"
+    # guardar: guarda lo confirmado, omite lo inválido, actualiza efectivo y marca la fuente
+    r = c.post("/api/hapi/photo/save", json={"rows": rows, "cash": 173.35})
+    assert r.status_code == 200 and r.json()["importadas"] == ["KO"] and r.json()["cash"] == 173.35
+    pf = c.get("/api/portfolio").json()
+    ko = next(p for p in pf["positions"] if p["ticker"] == "KO")
+    assert "captura analizada por IA" in ko["source"] and not ko["verified"]
+    assert ko["hapi_value"] == 192.0 and abs(ko["invested"] - 180.0) < 0.01
+    assert abs(pf["cash"] - 173.35) < 0.01
+    assert c.post("/api/hapi/photo/save", json={"rows": []}).status_code == 400
 
 
 def test_delete_all(session):

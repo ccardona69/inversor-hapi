@@ -36,6 +36,13 @@ CREATE TABLE IF NOT EXISTS trades (
     side TEXT NOT NULL, qty REAL NOT NULL, price REAL NOT NULL, fees REAL DEFAULT 0,
     currency TEXT DEFAULT 'USD', at TEXT NOT NULL, journal_id INTEGER, created_at TEXT NOT NULL
 );
+-- Procedencia adicional de operaciones importadas; las operaciones anteriores quedan intactas.
+CREATE TABLE IF NOT EXISTS trade_sources (
+    trade_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, source TEXT NOT NULL,
+    model TEXT, order_id TEXT, fingerprint TEXT NOT NULL, imported_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS trade_sources_user_fingerprint
+    ON trade_sources(user_id, fingerprint);
 CREATE TABLE IF NOT EXISTS cash (
     user_id INTEGER PRIMARY KEY, amount REAL DEFAULT 0, currency TEXT DEFAULT 'USD', updated_at TEXT
 );
@@ -50,6 +57,7 @@ CREATE TABLE IF NOT EXISTS prices (
 CREATE TABLE IF NOT EXISTS fundamentals (
     id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, ticker TEXT NOT NULL,
     data TEXT NOT NULL, source TEXT NOT NULL, asof TEXT NOT NULL, created_at TEXT NOT NULL,
+    period TEXT, unit TEXT, shares_unit TEXT,
     UNIQUE(user_id, ticker)
 );
 -- Módulo 12: diario de inversión (antes y después de cada decisión)
@@ -97,6 +105,10 @@ def get_db() -> sqlite3.Connection:
 def init_db():
     conn = get_db()
     conn.executescript(SCHEMA)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(fundamentals)")}
+    for column in ("period", "unit", "shares_unit"):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE fundamentals ADD COLUMN {column} TEXT")
     conn.commit()
     conn.close()
 

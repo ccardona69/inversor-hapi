@@ -16,7 +16,7 @@ uvicorn app.main:app --reload --port 8100
 
 ## Cómo probar
 ```bash
-python -m pytest tests/ -q               # 16 pruebas, no dependen de la red
+python -m pytest tests/ -q               # 21 pruebas, no dependen de la red
 ```
 Regla de la casa: no digas "funciona" sin correr esto y mostrar la salida.
 
@@ -27,6 +27,18 @@ Regla de la casa: no digas "funciona" sin correr esto y mostrar la salida.
 - `app/risk.py` — concentración, correlación, límites, estrés
 - `app/decisions.py` — motor de decisiones y checklist de "promediar a la baja"
 - `app/db.py` — esquema SQLite
+- `app/photosync.py` — sincronización de cartera por foto (IA de visión)
+
+## Sincronización por foto (IA)
+El usuario sube una captura de su cartera en Hapi; un modelo de visión extrae las
+posiciones y el efectivo, el usuario los revisa/edita en una tabla y confirma. Nada
+se guarda sin confirmación y todo entra «pendiente de verificación» con la fuente visible.
+
+- Credenciales en `.secrets/ai.env` (fuera de Git) o variables de entorno:
+  `INVERSOR_AI_API_KEY`, `INVERSOR_AI_BASE_URL`, `INVERSOR_AI_MODEL`,
+  `INVERSOR_AI_API_STYLE` (`responses` para Azure Foundry/GPT-5.x, `chat` para el resto).
+- Endpoints: `GET /api/hapi/photo/status`, `POST /api/hapi/photo/analyze`, `POST /api/hapi/photo/save`.
+- Regla crítica: la IA nunca inventa cifras; lo que no se ve en la captura llega `null`.
 
 ## Qué NO tocar
 - `inversor.db` — base de datos, está fuera de Git (en `.gitignore`). No la subas.

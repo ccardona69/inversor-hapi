@@ -72,6 +72,9 @@ def staleness(asof_iso: str | None) -> dict:
     except ValueError:
         return {"age_hours": None, "status": "sin_fecha", "usable_as_current": False}
     hours = (datetime.now(timezone.utc) - asof).total_seconds() / 3600
+    if hours < -5 / 60:
+        return {"age_hours": round(hours, 1), "status": "fecha_futura", "usable_as_current": False}
+    hours = max(0, hours)  # tolerancia a desfases de reloj de hasta cinco minutos
     if hours <= 24:
         status = "actual"
     elif hours <= 24 * 5:
