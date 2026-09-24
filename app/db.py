@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS positions (
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, ticker TEXT NOT NULL,
     side TEXT NOT NULL, qty REAL NOT NULL, price REAL NOT NULL, fees REAL DEFAULT 0,
-    currency TEXT DEFAULT 'USD', at TEXT NOT NULL, journal_id INTEGER, created_at TEXT NOT NULL
+    currency TEXT DEFAULT 'USD', at TEXT NOT NULL, created_at TEXT NOT NULL
 );
 -- Procedencia adicional de operaciones importadas; las operaciones anteriores quedan intactas.
 CREATE TABLE IF NOT EXISTS trade_sources (
@@ -75,10 +75,6 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE TABLE IF NOT EXISTS candidates (
     id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, ticker TEXT NOT NULL,
     name TEXT, data TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS alerts (
-    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, type TEXT NOT NULL,
-    level TEXT NOT NULL, text TEXT NOT NULL, dismissed INTEGER DEFAULT 0, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings (
     user_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT, PRIMARY KEY (user_id, key)
@@ -163,6 +159,13 @@ def set_setting(conn, user_id, key, value):
     conn.execute("INSERT INTO settings (user_id, key, value) VALUES (?,?,?) "
                  "ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value",
                  (user_id, key, json.dumps(value, ensure_ascii=False)))
+
+
+def cash_upsert(conn, user_id, amount):
+    conn.execute("INSERT INTO cash (user_id, amount, currency, updated_at) VALUES (?,?,?,?) "
+                 "ON CONFLICT(user_id) DO UPDATE SET amount=excluded.amount, "
+                 "currency=excluded.currency, updated_at=excluded.updated_at",
+                 (user_id, amount, "USD", now()))
 
 
 def latest_price(conn, ticker):

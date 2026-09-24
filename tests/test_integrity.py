@@ -1,9 +1,5 @@
 """Regresiones de integridad de posiciones; nunca usa inversor.db."""
-import os
-import tempfile
 from datetime import datetime, timedelta, timezone
-
-os.environ["INVERSOR_DB"] = os.path.join(tempfile.mkdtemp(), "integrity-import.db")
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,7 +27,10 @@ def test_local_home_serves_navigation_without_exposing_private_api(session):
     assert homepage.status_code == 200
     assert homepage.headers["cache-control"] == "no-cache"
     assert 'href="#analisis"' in homepage.text and 'href="#asistente"' in homepage.text
-    assert '#layout.hidden{display:none}' in homepage.text
+    assert '<link rel="stylesheet" href="/app.css">' in homepage.text
+    styles = anon.get("/app.css")
+    assert styles.status_code == 200 and styles.headers["cache-control"] == "no-cache"
+    assert '#layout.hidden{display:none}' in styles.text
     assert anon.get("/api/portfolio").status_code == 401
     assert anon.get("/api/assistant/status").status_code == 401
 

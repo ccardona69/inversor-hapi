@@ -32,11 +32,11 @@ Inicio (panel) → Cartera (cargar/validar/precios) → Perfil de riesgo → An�
 
 ## 6. Modelo de datos
 
-SQLite (`app/db.py`): `users`, `sessions`, `positions` (con `source` y `verified`), `trades`, `trade_sources` (procedencia de cada orden importada), `cash`, `prices` (histórico: cada precio con fuente, moneda y fecha/hora), `fundamentals` (JSON + fuente, fecha, período y unidades de informes confirmados), `journal` (tesis + evaluación posterior), `decisions` (propuesta y sus argumentos vs. elección del usuario), `candidates`, `alerts`, `settings` (perfil de riesgo y límites), `audit_log`. La migración de columnas de fundamentales es aditiva; no borra filas anteriores.
+SQLite (`app/db.py`): `users`, `sessions`, `positions` (con `source` y `verified`), `trades`, `trade_sources` (procedencia de cada orden importada), `cash`, `prices` (histórico: cada precio con fuente, moneda y fecha/hora), `fundamentals` (JSON + fuente, fecha, período y unidades de informes confirmados), `journal` (tesis + evaluación posterior), `decisions` (propuesta y sus argumentos vs. elección del usuario), `candidates`, `settings` (perfil de riesgo y límites), `audit_log`. Las alertas se calculan en vivo en `GET /api/alerts`, no tienen tabla. La migración de columnas de fundamentales es aditiva; no borra filas anteriores.
 
 ## 7. Arquitectura
 
-FastAPI + SQLite. Módulos: `marketdata.py` (Yahoo Finance chart API sin clave + clasificación de antigüedad + indicadores técnicos), `analysis.py` (scores fundamentales, múltiplos, DCF por escenarios con supuestos editables), `risk.py` (pesos, HHI, sectores, correlación, límites, estrés), `decisions.py` (motor de decisiones, checklist de promediar, simulador, perfil de riesgo), `main.py` (API + formato de recomendación del Módulo 14). Frontend: SPA sin dependencias (`static/index.html`, 12 pantallas). Separación explícita HECHO / CÁLCULO / ESTIMACIÓN / FALTANTE en las respuestas.
+FastAPI + SQLite. La configuración del proveedor de IA y su llamada viven en `ai_provider.py` (capa única). Módulos: `marketdata.py` (Yahoo Finance chart API sin clave + clasificación de antigüedad + indicadores técnicos), `analysis.py` (scores fundamentales, múltiplos, DCF por escenarios con supuestos editables), `risk.py` (pesos, HHI, sectores, correlación, límites, estrés), `decisions.py` (motor de decisiones, checklist de promediar, simulador, perfil de riesgo), `photosync.py` / `fundsync.py` / `tradesync.py` (extracción por foto de cartera, fundamentales y órdenes), `ai_assistant.py` / `ai_review.py` (consultas y revisión con Luna). Los endpoints viven en `app/routes/` por dominio (`auth`, `portfolio`, `market`, `trades`, `ai`, `decisions`, `system`) y `main.py` ensambla la app y sirve el frontend. Frontend: SPA sin dependencias (`static/index.html` + `app.css` + `app.js`, 12 pantallas, servida con `no-cache`). Separación explícita HECHO / CÁLCULO / ESTIMACIÓN / FALTANTE en las respuestas.
 
 ## 8. Fuentes de información propuestas
 
@@ -74,7 +74,7 @@ Las fotos de informes y órdenes, así como los fragmentos de tesis o de decisio
 ## 10. Pruebas
 
 ```bash
-python -m pytest tests/ -q     # cálculo, riesgo, integridad de precios, cartera, foto, IA y API
+python -m pytest tests/ -q     # 163 pruebas: cálculo, riesgo, integridad de precios, cartera, foto, IA y API
 ```
 
 Las pruebas no dependen de la red (precios manuales); el fetch real se prueba de forma tolerante a fallos.

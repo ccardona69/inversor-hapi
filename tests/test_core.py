@@ -3,12 +3,8 @@
 Las pruebas no dependen de la red: los precios se ingresan manualmente
 (el fetch de Yahoo se prueba por separado y de forma tolerante a fallos).
 """
-import os
 import json
-import tempfile
 from datetime import datetime, timezone, timedelta
-
-os.environ["INVERSOR_DB"] = os.path.join(tempfile.mkdtemp(), "test.db")
 
 import pytest
 from fastapi.testclient import TestClient
@@ -257,24 +253,6 @@ LUNA_TEST_ENV = {  # configuración de prueba: Azure Foundry estilo Responses
 }
 
 
-class _FakeResp:
-    def __init__(self, payload, status=200):
-        self._payload = payload
-        self.status_code = status
-        self.text = json.dumps(payload)
-    def json(self):
-        return self._payload
-
-
-class _FakeClient:
-    def __init__(self, payload):
-        self.payload = payload
-        self.calls = []
-    def post(self, url, headers=None, json=None):
-        self.calls.append({"url": url, "headers": headers, "body": json})
-        return _FakeResp(self.payload)
-
-
 def test_photosync_normalize_rows():
     rows, omitidas = PS.normalize_rows([
         {"ticker": "nvda", "qty": "1.54575", "avg_cost": "216.96", "value": 313.49,
@@ -290,40 +268,38 @@ def test_photosync_normalize_rows():
     assert r["invested"] is None and r["hapi_return_pct"] is None  # lo no visible no se inventa
 
 
-def test_photosync_analyze_responses_style():
+def test_photosync_analyze_responses_style(fake_client):
     reply = json.dumps({"posiciones": [
         {"ticker": "NVDA", "name": "NVIDIA", "qty": 1.54575, "avg_cost": 216.96,
          "invested": 335.37, "value": 313.49, "pl": -21.88, "pl_pct": -6.52}]})
     # dentro de un fence markdown, como suelen responder los modelos
-    fake = _FakeClient({"output": [{"content": [{"type": "output_text",
+    fake = fake_client({"output": [{"content": [{"type": "output_text",
                                                  "text": "```json\n" + reply + "\n```"}]}]})
     out = PS.analyze("falsobase64", "image/jpeg", env=LUNA_TEST_ENV, client=fake)
     assert out["rows"][0]["ticker"] == "NVDA" and out["model"] == "gpt-5.6-luna"
     assert out["cash"] is None
-    call = fake.calls[0]
-    assert call["url"].endswith("/foundry/openai/v1/responses")
-    assert call["headers"]["api-key"] == "clave-de-prueba"
-    cuerpo = call["body"]
+    url, headers, cuerpo = fake.calls[0]
+    assert url.endswith("/foundry/openai/v1/responses")
+    assert headers["api-key"] == "clave-de-prueba"
     assert cuerpo["max_output_tokens"] == 2048
     assert cuerpo["input"][0]["content"][1]["type"] == "input_image"
     assert cuerpo["input"][0]["content"][1]["image_url"].startswith("data:image/jpeg;base64,")
-    assert "image_url" in cuerpo["input"][0]["content"][1]
 
 
-def test_photosync_analyze_chat_style_and_errors():
+def test_photosync_analyze_chat_style_and_errors(fake_client):
     reply = json.dumps({"posiciones": []})
-    fake = _FakeClient({"choices": [{"message": {"content": reply}}]})
+    fake = fake_client({"choices": [{"message": {"content": reply}}]})
     env = dict(LUNA_TEST_ENV, INVERSOR_AI_API_STYLE="chat",
                INVERSOR_AI_BASE_URL="https://recurso.openai.azure.com")
     out = PS.analyze("falsobase64", "image/jpeg", env=env, client=fake)
     assert out["rows"] == []
-    url = fake.calls[0]["url"]
+    url = fake.calls[0][0]
     assert "/openai/deployments/gpt-5.6-luna/chat/completions" in url and "api-version=" in url
     # sin configuración, error claro (no se intenta la red)
     with pytest.raises(PS.PhotoSyncError):
         PS.analyze("x", "image/jpeg", env={}, client=fake)
     # respuesta sin JSON interpretable
-    malo = _FakeClient({"output": [{"content": [{"type": "output_text", "text": "no soy json"}]}]})
+    malo = fake_client({"output": [{"content": [{"type": "output_text", "text": "no soy json"}]}]})
     with pytest.raises(PS.PhotoSyncError):
         PS.analyze("x", "image/jpeg", env=LUNA_TEST_ENV, client=malo)
 

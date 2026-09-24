@@ -1,15 +1,11 @@
 """Pruebas sin red del asistente de consulta a Luna."""
-import os
-import tempfile
 from datetime import datetime, timedelta, timezone
-
-# La app inicializa SQLite al importarse: nunca usar inversor.db en las pruebas.
-os.environ["INVERSOR_DB"] = os.path.join(tempfile.mkdtemp(), "test-assistant.db")
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import ai_assistant as AI
+from app import ai_provider as AP
 from app import db as D
 from app.main import app
 
@@ -19,25 +15,8 @@ CONFIG = {"INVERSOR_AI_API_KEY": "clave-de-prueba", "INVERSOR_AI_MODEL": "gpt-5.
           "INVERSOR_AI_API_STYLE": "responses"}
 
 
-class FakeClient:
-    def __init__(self, payload, status=200):
-        self.payload, self.status = payload, status
-        self.calls = []
-
-    def post(self, url, headers=None, json=None):
-        self.calls.append((url, headers, json))
-        return self
-
-    @property
-    def status_code(self):
-        return self.status
-
-    def json(self):
-        return self.payload
-
-
-def test_ask_uses_same_responses_provider_without_image():
-    fake = FakeClient({"output": [{"content": [{"type": "output_text", "text": "Sin datos suficientes."}]}]})
+def test_ask_uses_same_responses_provider_without_image(fake_client):
+    fake = fake_client({"output": [{"content": [{"type": "output_text", "text": "Sin datos suficientes."}]}]})
     result = AI.ask("¿Tengo riesgo?", {"fecha_consulta": "2026-09-23", "posiciones": []},
                     env=CONFIG, client=fake)
     assert result == {"answer": "Sin datos suficientes.", "model": "gpt-5.6-luna", "asof": "2026-09-23"}
@@ -50,19 +29,19 @@ def test_ask_uses_same_responses_provider_without_image():
     assert "Nunca inventes precios" in body["instructions"]
 
 
-def test_ask_chat_and_error_paths(tmp_path, monkeypatch):
-    monkeypatch.setattr(AI.PS, "SECRETS_FILE", tmp_path / "ausente.env")
+def test_ask_chat_and_error_paths(tmp_path, monkeypatch, fake_client):
+    monkeypatch.setattr(AP, "SECRETS_FILE", tmp_path / "ausente.env")
     cfg = dict(CONFIG, INVERSOR_AI_API_STYLE="chat", INVERSOR_AI_BASE_URL="https://recurso.openai.azure.com")
-    fake = FakeClient({"choices": [{"message": {"content": "  Revisa la fecha. "}}]})
+    fake = fake_client({"choices": [{"message": {"content": "  Revisa la fecha. "}}]})
     assert AI.ask("¿Es actual?", {"fecha_consulta": "hoy"}, env=cfg, client=fake)["answer"] == "Revisa la fecha."
     assert "/chat/completions" in fake.calls[0][0]
     assert fake.calls[0][2]["messages"][0]["role"] == "system"
     with pytest.raises(AI.AssistantError, match="no configurada"):
         AI.ask("hola", {}, env={}, client=fake)
     with pytest.raises(AI.AssistantError, match="rechazó"):
-        AI.ask("hola", {}, env=CONFIG, client=FakeClient({}, status=401))
-    with pytest.raises(AI.AssistantError, match="respuesta de texto"):
-        AI.ask("hola", {}, env=CONFIG, client=FakeClient({"output": []}))
+        AI.ask("hola", {}, env=CONFIG, client=fake_client({}, status=401))
+    with pytest.raises(AI.AssistantError, match="interpretable"):
+        AI.ask("hola", {}, env=CONFIG, client=fake_client({"output": []}))
 
 
 @pytest.fixture

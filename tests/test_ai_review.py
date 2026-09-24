@@ -70,28 +70,19 @@ def test_explain_sends_only_whitelisted_report_without_numbers(monkeypatch, styl
 
 @pytest.mark.parametrize("style", ["responses", "chat"])
 @pytest.mark.parametrize("method", [RV.challenge, RV.explain])
-def test_provider_keeps_instructions_and_data_in_separate_roles(monkeypatch, style, method):
-    monkeypatch.setattr(AP.PS, "load_config", lambda env: {
+def test_provider_keeps_instructions_and_data_in_separate_roles(monkeypatch, style, method, fake_client):
+    monkeypatch.setattr(AP, "load_config", lambda env: {
         "api_key": "clave-ficticia", "base_url": "https://ejemplo.invalid/ai/v1",
         "model": "luna-prueba", "api_style": style, "api_version": "test"})
     reply = (json.dumps(COUNTERARGUMENTS, ensure_ascii=False) if method is RV.challenge
              else "El análisis propone esperar porque faltan datos.")
+    payload = ({"output": [{"content": [{"type": "output_text", "text": reply}]}]}
+               if style == "responses"
+               else {"choices": [{"message": {"content": reply}}]})
 
-    class FakeClient:
-        status_code = 200
-
-        def post(self, url, headers, json):
-            self.body = json
-            return self
-
-        def json(self):
-            if style == "responses":
-                return {"output": [{"content": [{"type": "output_text", "text": reply}]}]}
-            return {"choices": [{"message": {"content": reply}}]}
-
-    client = FakeClient()
+    client = fake_client(payload)
     method(ENTRY if method is RV.challenge else REPORT, env={}, client=client)
-    body = client.body
+    body = client.calls[0][2]
     if style == "responses":
         instructions = body["instructions"]
         user_text = body["input"][0]["content"][0]["text"]

@@ -41,8 +41,6 @@ def fetch_quote(ticker: str) -> dict:
         "ticker": ticker.upper(), "price": price, "currency": meta.get("currency", "USD"),
         "asof": asof, "source": "Yahoo Finance (chart API)",
         "day_change_pct": round((price / prev - 1) * 100, 2) if price and prev else None,
-        "fifty_two_week_high": meta.get("fiftyTwoWeekHigh"), "fifty_two_week_low": meta.get("fiftyTwoWeekLow"),
-        "exchange": meta.get("fullExchangeName"),
     }
 
 

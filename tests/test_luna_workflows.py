@@ -1,10 +1,6 @@
 """Flujos confirmados de Luna; nunca importa app.main con la base real."""
-import os
-import tempfile
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
-
-os.environ["INVERSOR_DB"] = os.path.join(tempfile.mkdtemp(), "luna-import.db")
 
 import pytest
 from fastapi.testclient import TestClient
