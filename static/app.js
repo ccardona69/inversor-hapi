@@ -6,55 +6,129 @@ async function api(path, opts={}){
   const r = await fetch('/api'+path,{headers:{'Content-Type':'application/json'},...opts,
     body: opts.body?JSON.stringify(opts.body):undefined});
   const data = await r.json().catch(()=>({}));
-  if(r.status===401 && path!=='/me'){ showLogin(); throw new Error('sesión'); }
   if(!r.ok){ data._status=r.status; throw data; }
   return data;
 }
-function showLogin(){ $('#view').replaceChildren(); $('#l-pass').value=''; $('#login').classList.remove('hidden'); $('#layout').classList.add('hidden'); }
-function showApp(){ $('#login').classList.add('hidden'); $('#layout').classList.remove('hidden'); route(); }
-async function doLogin(){ try{ await api('/login',{method:'POST',body:{email:$('#l-email').value,password:$('#l-pass').value}}); showApp(); }catch(e){ $('#l-msg').textContent=e.detail||'Error'; } }
-async function doRegister(){ try{ await api('/register',{method:'POST',body:{email:$('#l-email').value,password:$('#l-pass').value}}); showApp(); }catch(e){ $('#l-msg').textContent=e.detail||'Error'; } }
-async function logout(){ await api('/logout',{method:'POST'}); showLogin(); }
 window.addEventListener('hashchange', route);
 async function route(){
   const [page, arg] = location.hash.replace('#','').split('/');
-  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active', a.hash==='#'+(page||'inicio')));
-  const views = {inicio,cartera,asistente,analisis,comparador,simulador,oportunidades,alertas:alertasView,diario,historial,perfil,config};
-  try{ await (views[page||'inicio']||inicio)(arg); }
-  catch(e){ if(e.message!=='sesión') $('#view').innerHTML=`<div class="card">Error: ${esc(e.detail||e.message||JSON.stringify(e))}</div>`; }
+  const aliases = {asistente:'inicio',alertas:'inicio',historial:'diario',perfil:'ajustes',config:'ajustes',operar:'analisis'};
+  const resolved = aliases[page]||page||'inicio';
+  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active', a.hash==='#'+resolved));
+  const views = {inicio,cartera,analisis,diario,oportunidades,ajustes};
+  try{ await (views[resolved]||inicio)(arg); }
+  catch(e){ $('#view').innerHTML=`<div class="card">Error: ${esc(e.detail||e.message||JSON.stringify(e))}</div>`; }
 }
 const DISC = '<p class="disc">Herramienta de apoyo con datos aportados por el usuario y fuentes públicas citadas. No es asesoría financiera regulada, no garantiza rentabilidad y no ejecuta operaciones.</p>';
 
-/* ---------- 1. Inicio (panel principal) ---------- */
+/* ---------- 1. Hoy (panel principal con Luna) ---------- */
+let _lunaChat = [], _lunaSugs = [], _lunaConfigured = null;
+let _lastPriceRefresh = 0, _currentTickers = [];
+
+/* ---------- Mercado hoy y niveles por acción (regla técnica, no predicción) ---------- */
+const SEMAFORO_MKT = {normal:'ok', cauteloso:'warn', miedo:'err', sin_datos:'mut'};
+const SEMAFORO_ACC = {descuento:'ok', estirada:'warn', bajista:'err', neutral:'mut'};
+const pctS = (v,d=1) => v==null?'—':(v>0?'+':'')+fmt(v,d)+' %';
+const hora = iso => iso ? String(iso).replace('T',' ').slice(0,16) : '';
+function marketPulseHtml(p){
+  if(!p) return '<h3>Mercado hoy</h3><p class="sm mut">Sin datos de mercado ahora</p>';
+  const ok = (p.instrumentos||[]).filter(i=>!i.error);
+  return `<h3>Mercado hoy</h3>
+    <p class="sm"><span class="pill ${SEMAFORO_MKT[p.semaforo]||'mut'}">${esc((p.semaforo||'—').replaceAll('_',' '))}</span>
+      ${p.tipo_dia?`<b>Día ${esc(p.tipo_dia)}</b> · `:''}${esc(p.lectura||'')}</p>
+    <div class="mkt-chips">${ok.map(i=>`<span class="mkt-chip"><span class="mut">${esc(i.nombre)}</span>
+      <b>${fmt(i.price)}</b> <span class="${cls(i.day_change_pct)}">${pctS(i.day_change_pct)}</span></span>`).join('')}
+      ${(p.instrumentos||[]).filter(i=>i.error).map(i=>`<span class="mkt-chip mut">${esc(i.nombre)}: sin dato</span>`).join('')}</div>
+    <p class="sm mut">${esc(p.fuente||'')}${ok[0]?.asof?` · cotización ${esc(hora(ok[0].asof))}`:''} · leído ${esc(hora(p.fetched_at))}. ${esc(p.nota||'')}</p>`;
+}
+function nivelesHtml(n, posicion, extra=''){
+  if(!n) return `<p class="sm mut">Histórico insuficiente para niveles.</p>${extra}`;
+  const dc = posicion && posicion.avg_cost ? `<div>Desde tu costo ($ ${fmt(posicion.avg_cost)}): hoy <span class="${cls(posicion.desde_costo_pct)}">${pctS(posicion.desde_costo_pct)}</span>
+      · stop <span class="${cls(posicion.stop_desde_costo_pct)}">${pctS(posicion.stop_desde_costo_pct)}</span> · toma <span class="${cls(posicion.toma_desde_costo_pct)}">${pctS(posicion.toma_desde_costo_pct)}</span></div>` : '';
+  return `<p class="sm"><span class="pill ${SEMAFORO_ACC[n.semaforo]||'mut'}">${esc(n.semaforo)}</span>
+      ${n.tipo_dia?`<span class="pill mut">día ${esc(n.tipo_dia)}</span> `:''}${esc(n.lectura)}</p>
+    <div class="lv-grid sm">
+      <div>${n.entrada_zona?`<b>Entrada escalonada</b> $ ${fmt(n.entrada_zona[0])} – $ ${fmt(n.entrada_zona[1])}<div class="mut">${esc(n.entrada_nota)}</div>`:`<b>Entrada</b> <span class="mut">${esc(n.entrada_nota)}</span>`}</div>
+      <div><b>Stop loss</b> $ ${fmt(n.stop_loss)} <span class="neg">(${pctS(n.stop_loss_pct)})</span></div>
+      <div><b>Toma parcial</b> $ ${fmt(n.toma_parcial)} <span class="pos">(${pctS(n.toma_parcial_pct)})</span></div>
+      ${dc}
+    </div>${extra}
+    <p class="sm mut">${esc(n.regla)} Base $ ${fmt(n.precio_base)} · ATR14 ${fmt(n.atr14)}.</p>`;
+}
+async function loadLevels(tk){
+  const box = document.getElementById('lv-'+tk);
+  if(!box) return;
+  box.innerHTML = '<p class="sm mut">Calculando niveles…</p>';
+  try{
+    const r = await api('/levels/'+encodeURIComponent(tk));
+    const cur = document.getElementById('lv-'+tk); if(!cur) return;
+    const src = `<p class="sm mut">Precio $ ${fmt(r.precio.valor)} · ${esc(r.precio.fuente||'')} · ${esc(hora(r.precio.asof))}${r.tecnica?.error?` · ${esc(r.tecnica.error)}`:''}</p>`;
+    cur.innerHTML = `<b>Plan de niveles (regla ATR)</b>${nivelesHtml(r.niveles, r.posicion, src)}`;
+  }catch(e){
+    const cur = document.getElementById('lv-'+tk);
+    if(cur) cur.innerHTML = `<p class="sm" style="color:var(--err)">${esc(e.detail||'No se pudieron calcular los niveles.')}</p>`;
+  }
+}
+
 async function inicio(){
-  const d = await api('/dashboard');
-  const t = d.portfolio.totals;
-  const positions = d.portfolio.positions;
-  const verified = positions.filter(p=>p.verified).length;
-  const withPrice = positions.length-t.sin_precio_vigente.length;
-  const pending = !positions.length || t.sin_precio_vigente.length || t.sin_costo.length || verified<positions.length || d.portfolio.cash_currency!=='USD';
-  const deskTitle = !positions.length ? 'Empieza por registrar tu cartera' : t.sin_precio_vigente.length ? 'Faltan precios para decidir' : t.sin_costo.length ? 'Completa tus costos de compra' : verified<positions.length ? 'Confirma lo que aparece en tu cartera' : d.portfolio.cash_currency!=='USD' ? 'Revisa la moneda de tu efectivo' : 'Tus datos están listos para revisar';
-  const deskCopy = !positions.length ? 'Sube una captura de Hapi o registra tus posiciones manualmente. Ninguna cifra de la foto se confirma sola.' : pending ? 'Antes de comparar alternativas, comprueba importes, fechas y fuentes. Lo pendiente no se presenta como certeza.' : 'Ya puedes estudiar cada posición con sus supuestos visibles. La decisión final siempre es tuya.';
+  const pulseP = api('/market/pulse').catch(()=>null);
+  let [d, prof] = await Promise.all([api('/dashboard'), api('/profile')]);
+  let refreshMsg = '';
+  if(d.portfolio.positions.length && d.calidad_datos.some(q=>q.estado_precio!=='actual')
+     && Date.now()-_lastPriceRefresh > 5*60*1000){
+    _lastPriceRefresh = Date.now();
+    try{
+      const r = await api('/prices/refresh',{method:'POST'});
+      if(r.errors.length) refreshMsg = 'No se pudieron actualizar los precios de '+r.errors.map(e=>e.ticker).join(', ')+'. Ingrésalos manualmente en Cartera.';
+      else d = await api('/dashboard');
+    }catch(e){ refreshMsg = 'No se pudieron actualizar los precios. Revisa tu conexión o ingrésalos manualmente en Cartera.'; }
+  }
+  const t = d.portfolio.totals, positions = d.portfolio.positions;
+  const unverified = positions.filter(p=>!p.verified).length;
+  const priced = positions.filter(p=>p.price_info && p.price_info.asof);
+  const oldest = priced.length ? priced.reduce((a,b)=>b.price_info.asof<a.price_info.asof?b:a) : null;
+  _lunaSugs = ['¿Cómo va mi cartera hoy?','¿Qué tan concentrado estoy y qué alternativas tengo?'];
+  if(positions.length){
+    const top = positions.reduce((a,b)=>(b.market_value||0)>(a.market_value||0)?b:a);
+    _lunaSugs.push(`¿Qué debería vigilar de ${top.ticker}?`);
+  }
+  _lunaSugs.push((d.portfolio.cash||0)>=1 ? `¿Qué hago con mis $${fmt(d.portfolio.cash)} de efectivo?`
+                                         : '¿Qué me falta completar para decidir mejor?');
   $('#view').innerHTML = `
-  <h2>Resumen de inversión</h2><p class="sub">El estado de los datos va primero; las cifras vienen después.</p>
-  <section class="desk ${pending?'needs-review':''}" aria-label="Estado de la cartera">
-    <div><h3>${deskTitle}</h3><p>${deskCopy}</p>
-      <div class="desk-counts"><span><strong>${withPrice}/${positions.length}</strong> con precio vigente</span>
-        <span><strong>${verified}/${positions.length}</strong> confirmadas por ti</span></div></div>
-    <a class="desk-action" href="${pending?'#cartera':'#analisis'}">${pending?'Revisar mi cartera':'Analizar un activo'}</a>
-  </section>
+  <h2>Hoy</h2><p class="sub">Tu cartera de un vistazo y Luna para lo que no se ve en las cifras.</p>
+  ${refreshMsg?`<div class="alert">${esc(refreshMsg)}</div>`:''}
   ${t.sin_precio_vigente.length?`<div class="alert riesgo_elevado">Total y riesgo no calculables: faltan valores vigentes en USD para ${esc(t.sin_precio_vigente.join(', '))}. Revisa precios y monedas en <a href="#cartera">Cartera</a>.</div>`:''}
   ${d.portfolio.cash_currency!=='USD'?'<div class="alert riesgo_elevado">El efectivo no está en USD; el riesgo no se puede calcular sin un tipo de cambio verificable.</div>':''}
   ${t.sin_costo.length?`<div class="alert">Resultado no calculable: falta el costo invertido de ${esc(t.sin_costo.join(', '))}.</div>`:''}
+  <div class="card" id="mkt-hoy" aria-live="polite"><h3>Mercado hoy</h3><p class="sm mut">Leyendo el mercado…</p></div>
   <div class="stat-strip" aria-label="Resumen numérico">
     <div><div class="mut sm">Valor actual</div><div class="big">${t.valor_actual==null?'—':'$ '+fmt(t.valor_actual)}</div></div>
-    <div><div class="mut sm">Capital invertido</div><div class="big">${t.invertido==null?'—':'$ '+fmt(t.invertido)}</div></div>
-    <div><div class="mut sm">Resultado</div><div class="big ${cls(t.resultado)}">${t.resultado==null?'—':'$ '+fmt(t.resultado)}</div></div>
-    <div><div class="mut sm">Rendimiento</div><div class="big ${cls(t.rendimiento_pct)}">${t.rendimiento_pct==null?'—':fmt(t.rendimiento_pct)+' %'}</div></div>
+    <div><div class="mut sm">Cambio de hoy</div><div class="big ${cls(t.cambio_dia)}">${t.cambio_dia==null?'—':`$ ${fmt(t.cambio_dia)} (${fmt(t.cambio_dia_pct,1)} %)`}</div></div>
+    <div><div class="mut sm">Resultado total</div><div class="big ${cls(t.resultado)}">${t.resultado==null?'—':`$ ${fmt(t.resultado)} (${fmt(t.rendimiento_pct,1)} %)`}</div></div>
+    <div><div class="mut sm">Efectivo</div><div class="big">${d.portfolio.cash==null?'—':'$ '+fmt(d.portfolio.cash)}</div></div>
   </div>
+  ${oldest?`<p class="sm mut" style="margin-top:-8px">Precio más antiguo: ${esc(oldest.ticker)} · ${esc(oldest.price_info.fuente||'sin fuente')} · ${esc(oldest.price_info.asof)}</p>`:''}
+  ${unverified?`<div class="alert">${unverified} posición(es) sin confirmar.
+    <button class="mini" onclick="verifyAllPositions()">Confirmar todo</button> o revísalas una por una en <a href="#cartera">Cartera</a>.</div>`:''}
+  <section class="luna-panel" aria-label="Conversación con Luna">
+    <h3>Pregúntale a Luna</h3>
+    <div class="luna-sugs">${_lunaSugs.map((s,i)=>`<button type="button" onclick="lunaSend(_lunaSugs[${i}])">${esc(s)}</button>`).join('')}</div>
+    <div id="luna-log" class="luna-log" aria-live="polite"></div>
+    <div class="luna-input-row">
+      <textarea id="luna-input" maxlength="600" rows="2" placeholder="Escribe tu pregunta…"></textarea>
+      <button id="luna-send" type="button" onclick="lunaSend()">Enviar</button>
+      <button id="luna-new" class="sec" type="button" onclick="lunaNew()">Nueva conversación</button>
+    </div>
+    <p class="luna-note" id="luna-status" role="status"></p>
+    <p class="luna-note">Luna usa tus datos guardados con su fuente y fecha. No opera ni cambia tu cartera. Cada mensaje es una consulta al proveedor de IA.</p>
+  </section>
+  ${positions.length?'':`<div class="card"><h3>Empezar</h3>
+    <p class="sm">Sube una captura de tu cartera en Hapi o registra tus posiciones manualmente.</p>
+    <a class="desk-action" href="#cartera">Ir a Cartera</a></div>`}
   <div class="grid g2">
   <div class="card"><h3>Distribución y concentración</h3>
-    ${Object.entries(t.pesos_pct||{}).map(([k,v])=>`<div class="row sm"><span style="width:60px"><b>${k}</b></span><span>${v} %</span></div>`).join('')||`<p class="mut sm">${t.sin_precio_vigente.length?'Pendiente de valores vigentes en USD':'Sin posiciones valoradas'}</p>`}
+    ${Object.entries(t.pesos_pct||{}).map(([k,v])=>{const dp=positions.find(p=>p.ticker===k)?.day_change_pct;
+      return `<div class="row sm"><span style="width:60px"><b>${esc(k)}</b></span><span>${v} %</span>${dp==null?'':`<span class="${cls(dp)}">hoy ${pctS(dp)}</span>`}</div>`;}).join('')||`<p class="mut sm">${t.sin_precio_vigente.length?'Pendiente de valores vigentes en USD':'Sin posiciones valoradas'}</p>`}
     ${d.risk.error?`<p class="sm mut">${esc(d.risk.error)}</p>`:`<p class="sm" style="margin-top:8px">Concentración: <span class="pill ${d.risk.nivel_concentracion==='alta'?'err':'ok'}">${esc(d.risk.nivel_concentracion||'—')}</span>
      · HHI ${d.risk.hhi||'—'} · diversificación efectiva ≈ ${d.risk.diversificacion_efectiva||'—'} posiciones</p>`}
     ${(d.risk.correlacion||[]).map(c=>`<div class="alert">${esc(c)}</div>`).join('')}
@@ -62,85 +136,153 @@ async function inicio(){
   <div class="card"><h3>Alertas (${d.alerts.length})</h3>
     ${d.alerts.slice(0,6).map(a=>`<div class="alert ${a.level}"><span class="pill mut">${esc(a.level.replaceAll('_',' '))}</span> ${esc(a.text)}</div>`).join('')||'<p class="mut sm">Sin alertas</p>'}
   </div></div>
-  <div class="grid g2">
-  <div class="card"><h3>Calidad de los datos</h3>
-    <table><tr><th>Ticker</th><th>Precio</th><th>Verificada</th></tr>
-    ${d.calidad_datos.map(q=>`<tr><td>${q.ticker}</td><td><span class="pill ${q.estado_precio==='actual'?'ok':'warn'}">${esc(q.estado_precio.replaceAll('_',' '))}</span></td>
-      <td>${q.verificada?'✅':'⏳ pendiente'}</td></tr>`).join('')}</table>
-    <div class="row" style="margin-top:8px"><button class="mini" onclick="refreshPrices().then(inicio)">Actualizar precios</button></div></div>
-  <div class="card"><h3>Tesis recientes (Diario)</h3>
-    ${(d.tesis_recientes||[]).map(x=>`<div class="qbox"><b>${esc(x.ticker||'cartera')}</b> · ${esc(x.action||'')}
-      ${x.done?'<span class="pill ok">evaluada</span>':(x.review_date?`<span class="pill warn">revisar ${esc(x.review_date)}</span>`:'')}
-      <span class="mut sm">${(x.created_at||'').slice(0,10)}</span></div>`).join('')||'<p class="mut sm">Aún no registras tesis. Anota una en el Diario antes de operar.</p>'}
-  </div></div>
-  ${d.portfolio.positions.length?'':`<div class="card"><h3>Empezar</h3>
-    <p class="sm">Carga la cartera que reportaste desde Hapi (NVDA + MSFT, quedará marcada «pendiente de verificación») o registra posiciones manualmente en Cartera.</p>
-    <button onclick="api('/seed_hapi',{method:'POST'}).then(r=>{alert(r.detail);inicio()})">Cargar mi cartera de Hapi</button></div>`}
+  ${prof.complete?'':`<div class="card"><h3>Tu perfil de inversionista</h3>
+    <p class="sm mut">Con el perfil completo las propuestas pueden personalizarse.</p>
+    ${profileFormHtml(prof)}</div>`}
   ${DISC}`;
+  window._rpFields = prof.fields;
+  pulseP.then(p=>{ const box=$('#mkt-hoy'); if(box) box.innerHTML = marketPulseHtml(p); });
+  renderLunaLog();
+  const input = $('#luna-input');
+  input.addEventListener('keydown', e=>{
+    if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); lunaSend(); }
+  });
+  try{
+    const s = await api('/assistant/status');
+    if(!$('#luna-input')) return;
+    _lunaConfigured = s.configured;
+    $('#luna-send').disabled = !s.configured;
+    $('#luna-input').disabled = !s.configured;
+    $('#luna-status').textContent = s.configured ? `Modelo: ${s.model}` : s.hint;
+  }catch(e){ if($('#luna-status')) $('#luna-status').textContent = e.detail||'No se pudo consultar el estado de Luna'; }
 }
 async function refreshPrices(){
   const r = await api('/prices/refresh',{method:'POST'});
   if(r.errors.length) alert('Algunos precios no se pudieron obtener:\n'+r.errors.map(e=>e.ticker+': '+e.error).join('\n')+'\nPuedes ingresarlos manualmente en Cartera.');
   return r;
 }
+async function verifyAllPositions(){
+  const r = await api('/positions/verify_all',{method:'POST'});
+  inicio();
+  return r;
+}
 
-/* ---------- Consulta de solo lectura a Luna ---------- */
-async function asistente(){
-  $('#view').innerHTML = `<div class="assistant-wrap">
-    <h2>Consultar a Luna</h2>
-    <p class="sub">Pregunta por tus posiciones, riesgos, tesis o conceptos de inversión. Luna no modifica la cartera ni ejecuta operaciones.</p>
-    <div class="card assistant-form">
-      <form onsubmit="assistantAsk(event)">
-        <label for="ai-question">¿Qué quieres revisar?</label>
-        <textarea id="ai-question" maxlength="600" required placeholder="Por ejemplo: ¿Qué datos me faltan para revisar mi concentración?"></textarea>
-        <div class="row" style="margin-top:10px">
-          <button id="ai-submit" type="submit" disabled>Preguntar a Luna</button>
-          <span id="ai-status" class="sm mut" role="status"></span>
-        </div>
-      </form>
-    </div>
-    <div id="ai-result" class="card hidden" aria-live="polite">
-      <h3>Respuesta</h3><div id="ai-answer" class="assistant-answer"></div>
-      <p id="ai-asof" class="sm mut"></p>
-    </div>
-    <p class="sm mut">Se envían al proveedor de IA tu pregunta y un resumen de tu cartera, precios con fuente y fecha, riesgo, perfil resumido, fundamentales y hasta cinco tesis recientes. No se envían tu correo, contraseña ni la foto. La consulta no actualiza precios; verifica cualquier dato antes de decidir.</p>
-    ${DISC}</div>`;
-  try{
-    const s = await api('/assistant/status');
-    if(!$('#ai-status')) return;
-    $('#ai-status').textContent = s.configured ? `Modelo: ${s.model}` : s.hint;
-    $('#ai-submit').disabled = !s.configured;
-  }catch(e){ if($('#ai-status')) $('#ai-status').textContent = e.detail||'No se pudo consultar el estado de Luna'; }
+/* ---------- Chat de Luna (solo lectura; persiste al navegar, no al recargar) ---------- */
+function renderLunaLog(){
+  const log = $('#luna-log');
+  if(!log) return;
+  log.replaceChildren();
+  _lunaChat.forEach(m=>{
+    const wrap = document.createElement('div');
+    wrap.className = 'luna-msg '+(m.role==='user'?'user':'assistant');
+    const bubble = document.createElement('div');
+    bubble.className = 'luna-bubble';
+    bubble.textContent = m.content;
+    wrap.appendChild(bubble);
+    if(m.model){
+      const meta = document.createElement('div');
+      meta.className = 'luna-meta';
+      meta.textContent = `Modelo: ${m.model} · consulta ${m.asof||''}`;
+      wrap.appendChild(meta);
+    }
+    log.appendChild(wrap);
+  });
+  log.scrollTop = log.scrollHeight;
 }
-async function assistantAsk(event){
-  event.preventDefault();
-  const button = $('#ai-submit'), status = $('#ai-status');
-  if(button.disabled) return;
-  button.disabled = true;
-  status.textContent = 'Consultando a Luna…';
-  $('#ai-result').classList.add('hidden');
+async function lunaSend(text){
+  const input = $('#luna-input'), send = $('#luna-send'), log = $('#luna-log');
+  const question = String(text ?? input?.value ?? '').trim();
+  if(!question || (send && send.disabled)) return;
+  if(input) input.value = '';
+  if(send) send.disabled = true;
+  const userMsg = {role:'user', content:question};
+  _lunaChat.push(userMsg);
+  renderLunaLog();
+  const thinking = document.createElement('div');
+  thinking.className = 'luna-msg assistant';
+  thinking.id = 'luna-thinking';
+  const tb = document.createElement('div');
+  tb.className = 'luna-bubble luna-thinking';
+  tb.textContent = 'Luna está pensando…';
+  thinking.appendChild(tb);
+  log.appendChild(thinking);
+  log.scrollTop = log.scrollHeight;
+  const history = _lunaChat.slice(0,-1).filter(m=>!m.error).slice(-8)
+    .map(m=>({role:m.role, content:m.content.slice(0,4000)}));
   try{
-    const r = await api('/assistant/ask',{method:'POST',body:{question:$('#ai-question').value}});
-    if(!$('#ai-result')) return;
-    $('#ai-answer').textContent = r.answer;
-    $('#ai-asof').textContent = `Consulta: ${r.asof} · Modelo: ${r.model}. Comprueba las fuentes y fechas citadas.`;
-    $('#ai-result').classList.remove('hidden');
-    status.textContent = 'Respuesta recibida';
-  }catch(e){ if($('#ai-status')) status.textContent = e.detail||'No se pudo consultar a Luna. Inténtalo de nuevo.'; }
-  finally{ if($('#ai-submit')) button.disabled = false; }
+    const r = await api('/assistant/ask',{method:'POST',body:{question, history}});
+    thinking.remove();
+    _lunaChat.push({role:'assistant', content:r.answer, model:r.model, asof:r.asof});
+  }catch(e){
+    thinking.remove();
+    userMsg.error = true;
+    _lunaChat.push({role:'assistant', error:true, content:'No se pudo consultar a Luna: '+(e.detail||'error de conexión')+'. Inténtalo de nuevo.'});
+  }
+  renderLunaLog();
+  if(send) send.disabled = _lunaConfigured===false;
 }
+function lunaNew(){ _lunaChat = []; renderLunaLog(); }
 
 /* ---------- 2. Cartera ---------- */
 async function cartera(){
-  const [pf, val] = await Promise.all([api('/portfolio'), api('/validate')]);  $('#view').innerHTML = `
-  <h2>Cartera</h2><p class="sub">Registro manual, importación desde tu reporte de Hapi y validación de datos (Módulos 1 y 2).</p>
-  <div class="card"><div class="row">
-    <button class="sec" onclick="api('/seed_hapi',{method:'POST'}).then(cartera)">Cargar cartera reportada de Hapi</button>
-    <button class="sec" onclick="refreshPrices().then(cartera)">Actualizar precios (Yahoo Finance)</button>
-    <span class="sm mut">Efectivo disponible (USD): $</span><input id="cash" style="width:110px" value="${pf.cash??''}">
-    <button class="mini" onclick="if($('#cash').value===''){alert('Ingresa el efectivo en USD antes de guardarlo.');return}api('/cash',{method:'PUT',body:{amount:+$('#cash').value}}).then(cartera)">Guardar</button>
-  </div></div>
-  <div class="card"><h3>Sincronizar con Hapi — foto de tu cartera (IA)</h3>
+  const [pf, val] = await Promise.all([api('/portfolio'), api('/validate')]);
+  const t = pf.totals, cash = pf.cash;
+  const balance = t.valor_actual==null ? null : t.valor_actual + (cash||0);
+  const pctOf = n => balance ? fmt(n/balance*100,1)+' % del balance' : '— %';
+  const sgn = n => n>=0?'+':'-';
+  const plFmt = p => p.unrealized_pl==null ? '—'
+    : `${sgn(p.unrealized_pl)}$ ${fmt(Math.abs(p.unrealized_pl))}${p.return_pct==null?'':` (${sgn(p.return_pct)}${fmt(Math.abs(p.return_pct))} %)`}`;
+  const DONUT = ['#0d6e5f','#3f9c86','#8fd0bf','#173430','#6f8f86','#b7d9cf'];
+  const valued = pf.positions.filter(p=>p.market_value!=null);
+  const donutTotal = valued.reduce((s,p)=>s+p.market_value,0);
+  let _acc = 0;
+  const donutBg = donutTotal>0
+    ? 'conic-gradient('+valued.map((p,i)=>{const a=_acc;_acc+=p.market_value/donutTotal*100;
+        return `${DONUT[i%DONUT.length]} ${a}% ${_acc}%`;}).join(', ')+')'
+    : 'var(--acc2)';
+  $('#view').innerHTML = `
+  <h2>Cartera</h2><p class="sub">Lo que tienes hoy y cómo actualizarlo desde Hapi.</p>
+  <div class="card"><h3>Tu cartera hoy</h3>
+    ${t.sin_precio_vigente.length?`<div class="alert riesgo_elevado">El valor de algunas filas proviene de capturas, no está disponible o no está en USD. No hay un total actual fiable: ${esc(t.sin_precio_vigente.join(', '))}.</div>`:''}
+    ${pf.cash_currency!=='USD'?`<div class="alert riesgo_elevado">Efectivo registrado en ${esc(pf.cash_currency)}: introduce el importe real en USD solo si lo verificaste; no se convierte automáticamente.</div>`:''}
+    <div class="pf-top">
+      <div>
+        <div class="mut sm">Balance total</div>
+        <div class="big pf-balance-num">${balance==null?'—':'$ '+fmt(balance)}</div>
+        <div class="sm pf-line">En acciones <b>${t.valor_actual==null?'—':'$ '+fmt(t.valor_actual)}</b> <span class="mut">· ${pctOf(t.valor_actual||0)}</span></div>
+        <div class="sm pf-line">Efectivo <b>${cash==null?'—':'$ '+fmt(cash)}</b> <span class="mut">· ${cash==null?'— %':pctOf(cash)}</span></div>
+        <p class="sm mut pf-totals">Invertido $ ${fmt(t.invertido)} · Resultado <span class="${cls(t.resultado)}">${t.resultado==null?'—':`${sgn(t.resultado)}$ ${fmt(Math.abs(t.resultado))}${t.rendimiento_pct==null?'':` (${sgn(t.rendimiento_pct)}${fmt(Math.abs(t.rendimiento_pct))} %)`}`}</span></p>
+      </div>
+      <div class="pf-donut-zone">
+        <div class="donut" style="background:${donutBg}" role="img" aria-label="Distribución de las posiciones"></div>
+        <div class="donut-legend">${valued.map((p,i)=>`<span class="donut-chip"><i class="dot" style="background:${DONUT[i%DONUT.length]}"></i>${esc(p.ticker)} ${fmt(p.market_value/donutTotal*100,1)} %</span>`).join('')||'<span class="mut sm">Sin posiciones valoradas</span>'}</div>
+      </div>
+    </div>
+  </div>
+  <div class="card"><h3>Mis activos</h3>
+    ${pf.positions.map(p=>`
+    <details class="asset-row" data-tk="${esc(p.ticker)}">
+      <summary>
+        <span class="asset-ic">${esc((p.ticker||'?').charAt(0))}</span>
+        <span class="asset-main"><b>${esc(p.ticker)}</b><span class="sm mut">${p.name?esc(p.name)+' · ':''}${p.qty} acciones</span></span>
+        <span class="asset-val"><b>${p.market_value==null?`— ${esc(p.currency)}`:`${esc(p.currency)} ${fmt(p.market_value)}`}</b><span class="sm ${cls(p.unrealized_pl)}">${plFmt(p)}</span></span>
+      </summary>
+      <div class="asset-detail">
+        <div><div class="mut sm">Costo prom.</div>$ ${fmt(p.avg_cost)}</div>
+        <div><div class="mut sm">Invertido</div>$ ${fmt(p.invested)}</div>
+        <div><div class="mut sm">Precio usado</div>${fmt(p.price_info.precio_usado)}
+          <div class="sm mut">${esc(p.price_info.fuente||'')}</div>
+          <div class="sm mut">${esc(p.price_info.asof||'fecha no registrada')}</div></div>
+        <div class="asset-flags">
+          <span class="pill ${p.price_status==='actual'?'ok':'warn'}">${esc(p.price_status.replaceAll('_',' '))}</span>
+          ${p.verified?'<span class="pill ok">verificada</span>':`<button class="mini sec" onclick="api('/positions/${p.ticker}/verify',{method:'POST'}).then(cartera)">Confirmar datos</button>`}
+          <button class="mini danger" onclick="if(confirm('¿Eliminar ${p.ticker}?'))api('/positions/${p.ticker}',{method:'DELETE'}).then(cartera)">✕</button>
+        </div>
+        <div class="asset-levels lv-box" id="lv-${esc(p.ticker)}"></div>
+      </div>
+    </details>`).join('')||'<p class="mut sm">Aún no tienes posiciones. Sincroniza con una foto de Hapi o agrégalas desde Herramientas avanzadas.</p>'}
+  </div>
+  <div class="card"><h3>Sincronizar con Hapi (foto)</h3>
     <p class="sm mut">Sube una captura de tus posiciones en la app de Hapi: el modelo de visión configurado
       extrae los datos, tú los revisas en una tabla editable y confirmas para sincronizar. Nada se guarda sin tu confirmación.</p>
     <div class="row">
@@ -150,6 +292,12 @@ async function cartera(){
     </div>
     <div id="ph-map"></div>
   </div>
+  <div class="card"><div class="row">
+    <button class="sec" onclick="refreshPrices().then(cartera)">Actualizar precios (Yahoo Finance)</button>
+    <span class="sm mut">Efectivo disponible (USD): $</span><input id="cash" style="width:110px" value="${pf.cash??''}">
+    <button class="mini" onclick="if($('#cash').value===''){alert('Ingresa el efectivo en USD antes de guardarlo.');return}api('/cash',{method:'PUT',body:{amount:+$('#cash').value}}).then(cartera)">Guardar</button></div>
+  </div>
+  <details class="card"><summary>Herramientas avanzadas</summary>
   <div class="card"><h3>Operaciones ejecutadas — revisar captura</h3>
     <p class="sm mut">Solo órdenes ejecutadas, no posiciones ni órdenes pendientes. El modelo puede omitir datos: contrasta cada fila con Hapi. Analizar la foto puede generar costo del proveedor de IA; importar no calcula ni aplica costos.</p>
     <div class="row"><input type="file" id="tr-file" accept="image/*" style="max-width:320px" onchange="tradePhotoChanged()">
@@ -173,27 +321,6 @@ async function cartera(){
       <div id="tr-reconcile" role="status"></div>
     </div>
   </div>
-  <div class="card"><h3>Sincronizar con Hapi — importar archivo (CSV)</h3>
-    <p class="sm mut">Exportá tus posiciones desde la app de Hapi y subí el archivo aquí. <b>No se piden tus credenciales</b> ni se conecta a tu cuenta: lees el archivo vos. Los datos entran marcados «pendiente de verificación».</p>
-    <input type="file" id="csv-file" accept=".csv,.txt,text/csv" onchange="parseCsv(this)">
-    <div id="csv-map"></div>
-  </div>
-  <div class="card"><h3>Posiciones</h3>
-  ${pf.totals.sin_precio_vigente.length?`<div class="alert riesgo_elevado">El valor de algunas filas proviene de capturas, no está disponible o no está en USD. No hay un total actual fiable: ${esc(pf.totals.sin_precio_vigente.join(', '))}.</div>`:''}
-  ${pf.cash_currency!=='USD'?`<div class="alert riesgo_elevado">Efectivo registrado en ${esc(pf.cash_currency)}: introduce el importe real en USD solo si lo verificaste; no se convierte automáticamente.</div>`:''}
-  <table><tr><th>Ticker</th><th>Cantidad</th><th>Costo prom.</th><th>Invertido</th><th>Valor de referencia</th><th>P/L</th><th>Precio usado</th><th></th></tr>
-  ${pf.positions.map(p=>`<tr>
-    <td><b>${p.ticker}</b><br><span class="sm mut">${esc(p.name||'')}</span></td>
-    <td>${p.qty}</td><td>$ ${fmt(p.avg_cost)}</td><td>$ ${fmt(p.invested)}</td>
-    <td>${p.market_value==null?'—':`${esc(p.currency)} ${fmt(p.market_value)}`}</td><td class="${cls(p.unrealized_pl)}">${p.unrealized_pl==null?'—':`${esc(p.currency)} ${fmt(p.unrealized_pl)} (${fmt(p.return_pct)}%)`}</td>
-    <td class="sm">${fmt(p.price_info.precio_usado)}<br><span class="mut">${esc(p.price_info.fuente||'')}</span><br>
-      <span class="mut">${esc(p.price_info.asof||'fecha no registrada')}</span><br>
-      <span class="pill ${p.price_status==='actual'?'ok':'warn'}">${esc(p.price_status.replaceAll('_',' '))}</span>
-      ${p.verified?'<span class="pill ok">verificada</span>':`<button class="mini sec" onclick="api('/positions/${p.ticker}/verify',{method:'POST'}).then(cartera)">Confirmar datos</button>`}</td>
-    <td><button class="mini danger" onclick="if(confirm('¿Eliminar ${p.ticker}?'))api('/positions/${p.ticker}',{method:'DELETE'}).then(cartera)">✕</button></td>
-  </tr>`).join('')}</table>
-  <p class="sm" style="margin-top:8px"><b>Totales:</b> invertido $ ${fmt(pf.totals.invertido)} · valor $ ${fmt(pf.totals.valor_actual)} ·
-   resultado <span class="${cls(pf.totals.resultado)}">$ ${fmt(pf.totals.resultado)} (${fmt(pf.totals.rendimiento_pct)}%)</span></p></div>
   <div class="grid g2">
   <div class="card"><h3>Agregar / editar posición</h3>
     <div class="grid g2">
@@ -210,13 +337,17 @@ async function cartera(){
     <div><label>Fuente</label><input id="mp-src" placeholder="p. ej. app de Hapi, 19/07 10:30"></div></div>
     <button class="sec" style="margin-top:10px" onclick="manualPrice()">Registrar precio</button></div>
   </div>
-  <div class="card"><h3>Validación de datos (Módulo 2)</h3>
+  <div class="card"><h3>Validación de datos</h3>
   ${val.report.map(r=>`<details><summary>${r.ticker} ${r.inconsistencias.length?`<span class="pill err">${r.inconsistencias.length} inconsistencia(s)</span>`:'<span class="pill ok">coherente</span>'}</summary>
     ${r.inconsistencias.map(x=>`<div class="alert riesgo_elevado">⚠️ ${esc(x)}</div>`).join('')}
     <p class="sm"><b>Confirmados:</b></p><ul class="sm">${r.confirmados.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>
     <p class="sm"><b>Calculados:</b></p><ul class="sm">${r.calculados.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>
     <p class="sm"><b>Pendientes de verificación:</b></p><ul class="sm">${r.pendientes.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>
-  </details>`).join('')||'<p class="mut sm">Sin posiciones que validar.</p>'}</div>${DISC}`;
+  </details>`).join('')||'<p class="mut sm">Sin posiciones que validar.</p>'}</div></details>${DISC}`;
+  _currentTickers = pf.positions.map(p=>p.ticker);
+  document.querySelectorAll('details.asset-row').forEach(d=>d.addEventListener('toggle', ()=>{
+    if(d.open && !d.dataset.levelsLoaded){ d.dataset.levelsLoaded = '1'; loadLevels(d.dataset.tk); }
+  }));
   photoStatus();
 }
 async function addPos(){
@@ -229,66 +360,6 @@ async function manualPrice(){
   await api('/prices/manual',{method:'POST',body:{ticker:$('#mp-tk').value,price:+$('#mp-p').value,
     asof:$('#mp-asof').value,source:$('#mp-src').value||'ingreso manual'}});
   alert('Precio registrado con su fuente y fecha'); cartera();
-}
-
-/* ---------- Importador de CSV de Hapi (sin credenciales, se lee en el navegador) ---------- */
-let _csv=null;
-function csvSplit(line, delim){
-  const out=[]; let cur='', q=false;
-  for(let i=0;i<line.length;i++){ const c=line[i];
-    if(q){ if(c==='"'){ if(line[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=c; }
-    else { if(c==='"') q=true; else if(c===delim){ out.push(cur); cur=''; } else cur+=c; } }
-  out.push(cur); return out.map(s=>s.trim());
-}
-function csvNum(s){ if(s==null) return null; const c=String(s).replace(/[^0-9.\-]/g,''); const n=parseFloat(c); return isNaN(n)?null:n; }
-function csvGuess(headers, kws){ for(let i=0;i<headers.length;i++){ const h=headers[i].toLowerCase(); if(kws.some(k=>h.includes(k))) return i; } return -1; }
-function parseCsv(input){
-  const f=input.files[0]; if(!f) return;
-  const rd=new FileReader();
-  rd.onload=()=>{
-    const text=String(rd.result).replace(/\r/g,'');
-    const lines=text.split('\n').filter(l=>l.trim()!=='');
-    if(lines.length<2){ $('#csv-map').innerHTML='<p class="sm warn">El archivo no tiene filas de datos.</p>'; return; }
-    const delim = lines[0].split(';').length > lines[0].split(',').length ? ';' : ',';
-    _csv = {headers: csvSplit(lines[0], delim), rows: lines.slice(1).map(l=>csvSplit(l, delim))};
-    renderCsvMap();
-  };
-  rd.readAsText(f);
-}
-function renderCsvMap(){
-  const h=_csv.headers;
-  const opt=(sel)=>h.map((x,i)=>`<option value="${i}" ${i===sel?'selected':''}>${esc(x||('columna '+(i+1)))}</option>`).join('');
-  const none='<option value="-1">— ninguna —</option>';
-  $('#csv-map').innerHTML=`
-   <p class="sm" style="margin-top:10px">Confirmá qué columna es cada dato (se detectaron automáticamente):</p>
-   <div class="grid g4">
-    <div><label>Ticker *</label><select id="m-tk">${opt(csvGuess(h,['ticker','symbol','simbolo','activo','instrument']))}</select></div>
-    <div><label>Cantidad *</label><select id="m-qty">${opt(csvGuess(h,['cantidad','qty','shares','acciones','units','particip','quantity']))}</select></div>
-    <div><label>Costo prom. (opcional)</label><select id="m-avg">${none}${opt(csvGuess(h,['costo','avg','promedio','average','precio prom','cost per']))}</select></div>
-    <div><label>Invertido (opcional)</label><select id="m-inv">${none}${opt(csvGuess(h,['invertido','invested','basis','aporte']))}</select></div>
-   </div>
-   <div class="row" style="margin-top:8px"><button onclick="previewCsv()">Previsualizar</button>
-     <span class="sm mut">${_csv.rows.length} fila(s) en el archivo</span></div>
-   <div id="csv-prev"></div>`;
-}
-function previewCsv(){
-  const iT=+$('#m-tk').value, iQ=+$('#m-qty').value, iA=+$('#m-avg').value, iI=+$('#m-inv').value;
-  const rows=_csv.rows.map(r=>({ ticker:String(r[iT]||'').toUpperCase().trim(), qty:csvNum(r[iQ]),
-    avg_cost: iA>=0?csvNum(r[iA]):null, invested: iI>=0?csvNum(r[iI]):null }))
-    .filter(x=>x.ticker && x.qty>0);
-  if(!rows.length){ $('#csv-prev').innerHTML='<p class="sm warn" style="margin-top:8px">Con ese mapeo no hay filas válidas (ticker + cantidad > 0). Revisá las columnas.</p>'; return; }
-  window._csvRows=rows;
-  $('#csv-prev').innerHTML=`<table style="margin-top:10px"><tr><th>Ticker</th><th>Cantidad</th><th>Costo prom.</th><th>Invertido</th></tr>
-    ${rows.map(x=>`<tr><td><b>${esc(x.ticker)}</b></td><td>${x.qty}</td><td>${x.avg_cost??'—'}</td><td>${x.invested??'—'}</td></tr>`).join('')}</table>
-    <div class="row" style="margin-top:8px"><button onclick="doImportCsv()">Importar ${rows.length} posición(es)</button>
-      <span class="sm mut">Entrarán marcadas «pendiente de verificación».</span></div>`;
-}
-async function doImportCsv(){
-  try{
-    const r=await api('/positions/import',{method:'POST',body:{rows:window._csvRows}});
-    alert(r.detail + (r.omitidas.length?`\n\nOmitidas ${r.omitidas.length} fila(s) por ticker o cantidad inválidos.`:''));
-    cartera();
-  }catch(e){ alert(e.detail||'Error al importar'); }
 }
 
 /* ---------- Sincronizar con Hapi por foto (IA de visión) ---------- */
@@ -334,20 +405,30 @@ async function photoAnalyze(){
     return;
   }
   const num=(k,v)=>`<input id="ph-${k}" type="number" step="any" value="${v??''}">`;
+  const invCell=(x,i)=>{
+    const empty = x.invested==null || x.invested==='';
+    const derived = empty && x.hapi_value!=null && x.hapi_pl!=null
+      ? Math.round((x.hapi_value - x.hapi_pl)*100)/100 : x.invested;
+    return num(i+'-inv', derived) + (empty && derived!=null && derived!==''
+      ? '<br><span class="sm mut">calculado: valor − P/L</span>' : '');
+  };
   $('#ph-map').innerHTML = `
    <p class="sm" style="margin-top:10px">Detectado con <b>${esc(r.model)}</b>. Revisa cada dato contra tu app de Hapi y corrige lo que haga falta
      (los campos vacíos son datos que la IA no vio; no se inventan):</p>
    <table><tr><th>Ticker</th><th>Cantidad</th><th>Costo prom.</th><th>Invertido</th><th>Valor</th><th>P/L</th><th>P/L %</th></tr>
    ${r.rows.map((x,i)=>`<tr><td><b>${esc(x.ticker)}</b><br><span class="sm mut">${esc(x.name||'')}</span></td>
-     <td>${num(i+'-qty',x.qty)}</td><td>${num(i+'-avg',x.avg_cost)}</td><td>${num(i+'-inv',x.invested)}</td>
+     <td>${num(i+'-qty',x.qty)}</td><td>${num(i+'-avg',x.avg_cost)}</td><td>${invCell(x,i)}</td>
      <td>${num(i+'-val',x.hapi_value)}</td><td>${num(i+'-pl',x.hapi_pl)}</td><td>${num(i+'-plp',x.hapi_return_pct)}</td></tr>`).join('')}
    </table>
    ${r.omitted.length?`<p class="sm mut">${r.omitted.length} fila(s) descartada(s) por datos incompletos: ${esc(JSON.stringify(r.omitted))}</p>`:''}
+   <label class="review-check"><input id="ph-confirm" type="checkbox">Revisé cada dato contra Hapi.</label>
+   <label class="review-check"><input id="ph-replace" type="checkbox">Esta captura muestra toda mi cartera: quitar las posiciones que no aparecen.</label>
    <div class="row" style="margin-top:8px">
      <label style="margin:0">Efectivo / poder de compra (USD)</label>
      <input id="ph-cash" type="number" step="any" style="width:120px" value="${r.cash??''}">
      <button onclick="photoSave(${r.rows.length})">Sincronizar ${r.rows.length} posición(es)</button>
-     <span class="sm mut">Entrarán marcadas «pendiente de verificación» con la captura como fuente.</span>
+     <span id="ph-save-status" class="sm mut" role="status"></span>
+     <span class="sm mut">Con tu confirmación quedan verificadas; la captura queda como fuente.</span>
    </div>`;
   window._photoRows = r.rows;
 }
@@ -358,12 +439,25 @@ async function photoSave(n){
     rows.push({ticker:x.ticker, name:x.name, qty:g('qty'), avg_cost:g('avg'),
       invested:g('inv'), hapi_value:g('val'), hapi_pl:g('pl'), hapi_return_pct:g('plp')});
   });
+  if(!$('#ph-confirm')?.checked){
+    $('#ph-save-status').textContent = 'Marca «Revisé cada dato contra Hapi» para guardar la sincronización.';
+    return;
+  }
+  const replace = !!$('#ph-replace')?.checked;
+  if(replace){
+    const keep = new Set(rows.map(r2=>String(r2.ticker||'').toUpperCase()));
+    const remove = _currentTickers.filter(t=>!keep.has(t));
+    if(!confirm(remove.length
+      ? `Se quitarán de tu cartera: ${remove.join(', ')}.\n¿Continuar con la sincronización?`
+      : 'La captura cubre todas tus posiciones; no se quitará ninguna. ¿Continuar?')) return;
+  }
   const cashEl = $('#ph-cash');
-  const body = {rows};
+  const body = {rows, confirmed:true, replace_all:replace};
   if(cashEl && cashEl.value!=='') body.cash = +cashEl.value;
   try{
     const r = await api('/hapi/photo/save',{method:'POST',body});
-    alert(r.detail + (r.omitidas.length?`\n\nOmitidas ${r.omitidas.length} fila(s).`:''));
+    alert(r.detail + (r.omitidas.length?`\n\nOmitidas ${r.omitidas.length} fila(s).`:'')
+      + (r.eliminadas && r.eliminadas.length?`\nQuitadas de tu cartera: ${r.eliminadas.join(', ')}`:''));
     cartera();
   }catch(e){ alert(e.detail||'Error al sincronizar'); }
 }
@@ -523,37 +617,211 @@ async function applyReconcile(){
   }catch(e){ if($('#tr-reconcile')) output.textContent=reviewError(e,'No se pudo aplicar el costo.'); }
 }
 
-/* ---------- 3. Análisis y decisión (detalle del activo) ---------- */
+/* ---------- 3. ¿Compro o vendo? (evaluación de una operación concreta) ---------- */
+let _tcCtx = null, _tcLast = null, _lunaOpinion = null;
 async function analisis(arg){
-  const pf = await api('/portfolio');
-  const tickers = pf.positions.map(p=>p.ticker);
-  const tk = (arg||tickers[0]||'').toUpperCase();
+  const [pf, cands] = await Promise.all([api('/portfolio'), api('/candidates')]);
+  const tk = (arg||'').trim().toUpperCase();
+  const tickers = [...new Set([...pf.positions.map(p=>p.ticker),
+    ...(cands.candidates||[]).map(c=>c.ticker)])];
+  _tcCtx = {positions: pf.positions, cash: pf.cash};
+  _tcLast = null; _lunaOpinion = null;
   $('#view').innerHTML = `
-  <h2>Análisis y decisión</h2>
-  <p class="sub">Responde: qué ocurre, si la valoración es razonable, qué riesgos hay y qué alternativa conviene — con argumentos y supuestos visibles.</p>
-  <div class="card"><div class="row">
-    <select id="an-tk" style="width:140px">${tickers.map(t=>`<option ${t===tk?'selected':''}>${t}</option>`).join('')}</select>
-    <button onclick="runAnalysis()">Analizar</button>
-    <button class="sec" onclick="fundForm($('#an-tk').value)">Fundamentales…</button>
-    <span class="sm mut">Supuestos DCF:</span>
-    <label class="sm" style="margin:0">crec. 1-5a %</label><input id="as-g" style="width:70px" value="15">
-    <label class="sm" style="margin:0">descuento %</label><input id="as-r" style="width:70px" value="10">
-    <label class="sm" style="margin:0">terminal %</label><input id="as-t" style="width:70px" value="2.5">
-  </div></div>
-  <div id="an-out">${tk?'<p class="mut">Pulsa Analizar.</p>':'<p class="mut">Registra posiciones primero.</p>'}</div>${DISC}`;
-  if(arg) runAnalysis();
+  <h2>¿Compro o vendo?</h2>
+  <p class="sub">Escribe la operación que estás pensando hacer en Hapi. Ves cómo queda tu cartera,
+    qué dicen tus límites y el motor, y Luna te da una segunda opinión.</p>
+  <div class="card"><div class="grid g3">
+    <div><label for="tc-tk">Ticker</label>
+      <input id="tc-tk" list="tc-tickers" value="${esc(tk)}" style="text-transform:uppercase">
+      <datalist id="tc-tickers">${tickers.map(t=>`<option value="${esc(t)}">`).join('')}</datalist></div>
+    <div><label>Operación</label><div class="row">
+      <label class="review-check"><input type="radio" name="tc-side" value="comprar" checked>Comprar</label>
+      <label class="review-check"><input type="radio" name="tc-side" value="vender">Vender</label></div></div>
+    <div><label for="tc-amt">Monto USD</label><input id="tc-amt" type="number" step="any" min="0"></div>
+  </div>
+  <div class="row sm" id="tc-shortcuts" style="margin-top:6px"></div>
+  <div class="row" style="margin-top:8px">
+    <button id="tc-go" type="button" onclick="tradeCheck()">Evaluar operación</button>
+    <span id="tc-status" class="sm mut" role="status"></span></div>
+  </div>
+  <div id="tc-out"></div>${DISC}`;
+  tcShortcuts();
+  $('#tc-tk').addEventListener('input', tcShortcuts);
+  document.querySelectorAll('input[name=tc-side]').forEach(r=>r.addEventListener('change', tcShortcuts));
 }
-async function runAnalysis(){
-  const tk = $('#an-tk').value;
-  $('#an-out').innerHTML = '<p class="mut">Analizando (obteniendo histórico de la fuente)…</p>';
-  let r;
-  try{
-    r = await api('/analysis/'+tk,{method:'POST',body:{assumptions:{
-      growth_1_5_pct:+$('#as-g').value, discount_rate_pct:+$('#as-r').value, terminal_growth_pct:+$('#as-t').value}}});
-  }catch(e){
-    if($('#an-out')) $('#an-out').innerHTML = `<div class="alert riesgo_elevado">${esc(e.detail||'No se pudo generar el análisis. Revisa los precios en Cartera.')}</div>`;
-    return;
+function tcSetAmt(v){ const el=$('#tc-amt'); if(el) el.value=v; }
+function tcShortcuts(){
+  if(!_tcCtx) return;
+  const tk = $('#tc-tk')?.value.trim().toUpperCase()||'';
+  const pos = _tcCtx.positions.find(p=>p.ticker===tk);
+  const vr = document.querySelector('input[name=tc-side][value=vender]');
+  if(vr){
+    vr.disabled = !pos;
+    if(!pos && vr.checked) document.querySelector('input[name=tc-side][value=comprar]').checked = true;
   }
+  const side = document.querySelector('input[name=tc-side]:checked')?.value||'comprar';
+  let html = [50,100,200].map(v=>`<button type="button" class="mini sec" onclick="tcSetAmt(${v})">$ ${v}</button>`).join('');
+  if(side==='comprar' && _tcCtx.cash>=1)
+    html += `<button type="button" class="mini sec" onclick="tcSetAmt(${_tcCtx.cash})">Todo mi efectivo ($ ${fmt(_tcCtx.cash)})</button>`;
+  if(side==='vender' && pos && pos.market_value!=null)
+    html += `<button type="button" class="mini sec" onclick="tcSetAmt(${pos.market_value})">Toda la posición ($ ${fmt(pos.market_value)})</button>`;
+  const box = $('#tc-shortcuts'); if(box) box.innerHTML = html;
+}
+async function tradeCheck(assumptions){
+  const tk = ($('#tc-tk').value||'').trim().toUpperCase();
+  const side = document.querySelector('input[name=tc-side]:checked').value;
+  const amount = +$('#tc-amt').value;
+  const btn = $('#tc-go'), out = $('#tc-out');
+  if(!tk || !(amount>0)){ $('#tc-status').textContent='Escribe el ticker y un monto mayor a cero.'; return; }
+  btn.disabled = true; btn.textContent = 'Evaluando…'; $('#tc-status').textContent = '';
+  _lunaOpinion = null;
+  out.innerHTML = '<p class="mut">Evaluando la operación con precios de mercado…</p>';
+  try{
+    const r = await api('/trade_check',{method:'POST',body:{ticker:tk, side,
+      amount_usd:amount, assumptions:assumptions||null}});
+    _tcLast = r;
+    renderTradeCheck(r);
+  }catch(e){
+    out.innerHTML = `<div class="alert riesgo_elevado">${esc(reviewError(e,'No se pudo evaluar la operación.'))}</div>`;
+  }finally{ btn.disabled = false; btn.textContent = 'Evaluar operación'; }
+}
+function renderTradeCheck(r){
+  const pct = v => v==null?'—':fmt(v,2)+' %';
+  const limVal = l => l.valor==null?'—':(l.limite==='Reserva mínima de efectivo'?'$ '+fmt(l.valor):pct(l.valor));
+  const limMax = l => l.limite==='Reserva mínima de efectivo'?'$ '+fmt(l.maximo):pct(l.maximo);
+  $('#tc-out').innerHTML = `
+  <div class="card"><h3>${r.operacion==='comprar'?'Comprar':'Vender'} $ ${fmt(r.monto_usd)} de ${esc(r.ticker)}</h3>
+    <p class="sm">Precio: <b>$ ${fmt(r.precio.valor)}</b> <span class="mut">${esc(r.precio.fuente||'')} · ${esc(r.precio.asof||'')}</span>
+      · ≈ ${fmt(r.acciones_aprox,6)} acciones (fraccionadas)</p>
+    <div class="grid g2">
+      <div class="qbox"><b>Peso de ${esc(r.ticker)}</b><br>${pct(r.peso_antes_pct)} → ${pct(r.peso_despues_pct)}</div>
+      <div class="qbox"><b>Efectivo</b><br>$ ${fmt(r.efectivo_antes)} → $ ${fmt(r.efectivo_despues)}
+        ${r.deposito_necesario>0?`<br><span class="sm mut">tras depositar $ ${fmt(r.deposito_necesario)}</span>`:''}</div>
+    </div>
+    ${r.deposito_necesario>0?`<div class="alert riesgo_elevado">Te faltan $ ${fmt(r.deposito_necesario)} de efectivo: deposita en Hapi o reduce el monto.</div>`:''}
+    <table><tr><th>Límite</th><th>Quedaría en</th><th>Tu máximo</th><th></th></tr>
+      ${r.limites.map(l=>`<tr><td>${esc(l.limite)}</td><td>${limVal(l)}</td><td>${limMax(l)}</td>
+        <td class="${l.cumple?'pos':'neg'}">${l.cumple?'✓':'✗'}</td></tr>`).join('')}</table>
+    <p class="sm" style="margin-top:8px">El motor propone:
+      <span class="pill">${esc(r.motor.propuesta.replaceAll('_',' '))}</span>
+      <span class="pill ${r.motor.confianza==='baja'?'warn':'ok'}">confianza ${esc(r.motor.confianza)}</span></p>
+    <ul class="sm">${r.motor.argumentos.map(a=>`<li>${esc(a)}</li>`).join('')}</ul>
+    ${r.fundamentales_nota?`<p class="sm mut">Fundamentales: ${esc(r.fundamentales_nota)}</p>`:''}
+    <p class="sm mut">${esc(r.nota)}</p>
+    <div class="row">
+      <button class="sec" type="button" onclick="lunaOpinion(${r.decision_id})">Segunda opinión de Luna</button>
+      <button class="sec" type="button" onclick="tradeJournalForm(${r.decision_id})">Guardar en mi diario</button>
+    </div>
+    <p class="sm mut">Luna opina sobre esta evaluación; no decide ni opera por ti. La consulta al proveedor de IA puede generar costo.</p>
+    <div id="luna-op"></div>
+    <div id="tc-journal"></div>
+  </div>
+  <div class="card"><h3>Niveles de referencia</h3>
+    ${nivelesHtml(r.niveles, null)}
+    <p class="sm">Mercado hoy: ${r.mercado_hoy?`<span class="pill ${SEMAFORO_MKT[r.mercado_hoy.semaforo]||'mut'}">${esc((r.mercado_hoy.semaforo||'—').replaceAll('_',' '))}</span>
+      ${r.mercado_hoy.tipo_dia?` · día ${esc(r.mercado_hoy.tipo_dia)}`:''}<span class="mut"> — ${esc(r.mercado_hoy.lectura||'')}</span>`:'<span class="mut">sin datos de mercado ahora</span>'}</p>
+  </div>
+  <details class="card"><summary>Ver análisis completo</summary>
+    <div class="row sm" style="margin:8px 0">
+      <span class="sm mut">Supuestos DCF:</span>
+      <label class="sm" style="margin:0">crec. 1-5a %</label><input id="as-g" style="width:70px" value="15">
+      <label class="sm" style="margin:0">descuento %</label><input id="as-r" style="width:70px" value="10">
+      <label class="sm" style="margin:0">terminal %</label><input id="as-t" style="width:70px" value="2.5">
+      <button class="mini sec" type="button"
+        onclick="tradeCheck({growth_1_5_pct:+$('#as-g').value,discount_rate_pct:+$('#as-r').value,terminal_growth_pct:+$('#as-t').value})">Recalcular</button>
+      <button class="mini sec" type="button" onclick="fundForm('${esc(r.ticker)}')">Fundamentales…</button>
+    </div>
+    <div id="an-out"></div>
+  </details>`;
+  renderAnalysis(r.analisis);
+}
+async function lunaOpinion(did){
+  const out = $('#luna-op');
+  if(!out) return;
+  out.textContent = 'Consultando a Luna…';
+  try{
+    const r = await api(`/trade_check/${did}/luna`,{method:'POST'});
+    if($('#luna-op')!==out) return;
+    _lunaOpinion = r;
+    out.replaceChildren();
+    const box = document.createElement('div'); box.className = 'review-step';
+    const h = document.createElement('h4'); h.textContent = 'Segunda opinión de Luna'; box.appendChild(h);
+    const p = document.createElement('p'); p.className = 'sm'; p.textContent = r.resumen; box.appendChild(p);
+    const mk = (title,items)=>{
+      const s = document.createElement('div'); s.className = 'sm';
+      const b = document.createElement('b'); b.textContent = title; s.appendChild(b);
+      const ul = document.createElement('ul');
+      items.forEach(t=>{ const li = document.createElement('li'); li.textContent = t; ul.appendChild(li); });
+      s.appendChild(ul); return s;
+    };
+    box.appendChild(mk('A favor', r.a_favor));
+    box.appendChild(mk('En contra', r.en_contra));
+    box.appendChild(mk('Qué vigilar', r.vigilar));
+    const meta = document.createElement('p'); meta.className = 'sm mut';
+    meta.textContent = `Modelo: ${r.model}. Opinión sobre los datos ya evaluados; no es una orden.`; box.appendChild(meta);
+    out.appendChild(box);
+  }catch(e){ if($('#luna-op')===out) out.textContent = reviewError(e,'No se pudo obtener la opinión de Luna.'); }
+}
+function tradeJournalForm(did){
+  const r = _tcLast, j = $('#tc-journal');
+  if(!r || !j) return;
+  const pos = (_tcCtx?.positions||[]).find(p=>p.ticker===r.ticker);
+  let action, choice;
+  if(r.operacion==='comprar'){
+    action = pos ? 'agregar' : 'comprar';
+    choice = pos ? 'agregar_gradualmente' : 'comprar';
+  }else{
+    const full = pos && r.monto_usd >= (pos.market_value||0) - 0.01;
+    action = full ? 'vender' : 'reducir';
+    choice = full ? 'vender' : 'reducir';
+  }
+  const rev = new Date(Date.now()+90*864e5).toISOString().slice(0,10);
+  // Textos prellenados solo con cifras del resultado (editables; nada se inventa).
+  const n = r.niveles, mh = r.mercado_hoy;
+  let tesis = `${r.operacion==='comprar'?'Comprar':'Vender'} $${fmt(r.monto_usd)} de ${r.ticker} a $${fmt(r.precio.valor)} (${(r.fecha||'').slice(0,10)}). `
+    + `Motor: ${r.motor.propuesta.replaceAll('_',' ')} (confianza ${r.motor.confianza}).`;
+  if(mh && mh.semaforo && mh.semaforo!=='sin_datos') tesis += ` Mercado: ${mh.semaforo.replaceAll('_',' ')}${mh.tipo_dia?`, día ${mh.tipo_dia}`:''}.`;
+  if(n) tesis += ` Semáforo de la acción: ${n.semaforo}.`;
+  const limVal = l => l.valor==null?'—':(l.limite==='Reserva mínima de efectivo'?'$'+fmt(l.valor):fmt(l.valor,1)+'%');
+  const limMax = l => l.limite==='Reserva mínima de efectivo'?'$'+fmt(l.maximo):fmt(l.maximo,1)+'%';
+  const fallan = (r.limites||[]).filter(l=>!l.cumple);
+  let riesgos = (_lunaOpinion?.en_contra||[]).join('; ');
+  if(!riesgos){
+    const partes = [];
+    if(fallan.length) partes.push('Incumple: '+fallan.map(l=>`${l.limite} (${limVal(l)} ${l.limite==='Reserva mínima de efectivo'?'<':'>'} ${limMax(l)})`).join('; '));
+    if(r.tecnica?.volatilidad_anualizada_pct!=null) partes.push(`Volatilidad anual ${fmt(r.tecnica.volatilidad_anualizada_pct,1)}%`);
+    riesgos = partes.join('. ');
+  }
+  const inval = n ? `Cierre diario por debajo de $${fmt(n.stop_loss)} (stop sugerido, ${pctS(n.stop_loss_pct).replace(' ','')}) o cambio en la tesis.`
+                  : 'Cambio en la tesis o incumplimiento de mis límites.';
+  j.innerHTML = `<div class="review-step"><h4>Guardar en mi diario</h4>
+    <p class="sm mut">Textos prellenados con las cifras de esta evaluación; edítalos antes de registrar.</p>
+    <div class="grid g2">
+      <div><label for="tj-tesis">Tesis *</label><textarea id="tj-tesis" placeholder="¿Por qué haces esta operación?">${esc(tesis)}</textarea></div>
+      <div><label for="tj-riesgos">Riesgos *</label><textarea id="tj-riesgos" placeholder="¿Qué puede salir mal?">${esc(riesgos)}</textarea></div>
+      <div><label for="tj-inv">Condición de invalidación *</label><textarea id="tj-inv" placeholder="¿Qué tendría que pasar para que cambies de opinión?">${esc(inval)}</textarea></div>
+      <div><label for="tj-rev">Revisar el</label><input id="tj-rev" type="date" value="${rev}">
+        <label for="tj-precio">Precio</label><input id="tj-precio" type="number" step="any" value="${r.precio.valor}"></div>
+    </div>
+    <p class="sm mut">Se registrará como «${esc(action)}». La ejecución la haces tú en Hapi.</p>
+    <button type="button" id="tj-save" onclick="saveTradeJournal(${did},'${action}','${choice}')">Registrar en el diario</button>
+    <span id="tj-status" class="sm mut" role="status"></span></div>`;
+}
+async function saveTradeJournal(did, action, choice){
+  const st = $('#tj-status'), btn = $('#tj-save');
+  if(!st) return;
+  if(btn) btn.disabled = true;
+  const p = $('#tj-precio').value;
+  try{
+    await api('/journal',{method:'POST',body:{ticker:_tcLast.ticker, action,
+      tesis:$('#tj-tesis').value, riesgos:$('#tj-riesgos').value,
+      condicion_invalidacion:$('#tj-inv').value,
+      precio:p===''?null:+p, review_date:$('#tj-rev').value}});
+    await api(`/decisions/${did}/record`,{method:'POST',body:{choice, authorized:true}});
+    st.textContent = 'Guardado en tu diario. Si decides operar, hazlo en Hapi y luego sincroniza tu cartera con una foto.';
+  }catch(e){ st.textContent = reviewError(e,'No se pudo guardar.'); if(btn) btn.disabled = false; }
+}
+function renderAnalysis(r){
   const d = r.decision, sc = r.valoracion.escenarios, tec = r.situacion_tecnica||{};
   const scoreRow = Object.entries(r.analisis_fundamental.scores||{}).map(([k,v])=>
     `<tr><td>${k.replaceAll('_',' ')}</td><td>${v.score==null?'<span class="pill warn">falta dato</span>':`<b>${v.score}</b>/10`}</td><td class="sm mut">${esc(v.reason)}</td></tr>`).join('');
@@ -570,10 +838,6 @@ async function runAnalysis(){
      <span class="pill ${d.nivel_confianza==='baja'?'warn':'ok'}">confianza ${d.nivel_confianza}</span></h3>
     <p class="sm"><b>Pregunta obligatoria:</b> ${esc(d.pregunta_obligatoria)}</p>
     <ul class="sm">${d.argumentos.map(a=>`<li>${esc(a)}</li>`).join('')}</ul>
-    <div class="row">
-      ${['comprar','agregar_gradualmente','mantener','reducir','vender','esperar'].map(a=>
-        `<button class="mini sec" onclick="recordDecision(${r.decision_id},'${a}')">Registrar: ${a.replaceAll('_',' ')}</button>`).join('')}
-    </div>
     <p class="sm mut" style="margin-top:6px">${esc(d.nota)} Próxima revisión: ${esc(r.proxima_revision)}.</p>
     <button class="mini sec" type="button" onclick="explainDecision(${r.decision_id})">Explicar esta propuesta con Luna</button>
     <p class="sm mut">Luna pone en palabras la propuesta ya guardada; no produce otra recomendación. La consulta al proveedor de IA puede generar costo.</p>
@@ -616,12 +880,6 @@ async function runAnalysis(){
     </table><p class="sm mut">${esc(tec.nota||'')} Fuente: ${esc(tec.fuente||'')}</p>`}</div>
   </div>`;
 }
-async function recordDecision(id,choice){
-  const ok = confirm(`Vas a registrar tu decisión: «${choice.replaceAll('_',' ')}».\nRecuerda: la ejecución la haces tú en Hapi; esta app nunca opera por ti. ¿Confirmas el registro?`);
-  if(!ok) return;
-  const r = await api(`/decisions/${id}/record`,{method:'POST',body:{choice,authorized:true}});
-  alert(r.detail);
-}
 async function explainDecision(id){
   const output=$('#explain-'+id);
   if(!output) return;
@@ -639,6 +897,8 @@ async function fundForm(tk){
   $('#an-out').innerHTML = `
   <div class="card"><h3>Fundamentales de ${esc(tk)}</h3>
   <p class="sub">Ingresa datos anuales o TTM de un informe verificable. No mezcles cifras trimestrales con anuales para el DCF. Fuente y fecha obligatorias; sin datos el sistema no inventa nada.</p>
+  <div class="row"><button class="sec" type="button" onclick="secFund('${esc(tk)}')">Cargar desde la SEC (10-K oficial)</button>
+    <span id="sec-status" class="sm mut" role="status"></span></div>
   <div class="review-step"><h4>Extraer un informe por foto</h4>
     <p class="sm mut">Una captura legible de un informe puede aportar cifras sin escalarlas. El modelo de IA puede generar costo y devolver campos vacíos. Comprueba período, fecha de cierre y escalas de dinero y acciones en el informe; un trimestre aislado no se guarda como anual.</p>
     <div class="row"><input id="fp-file" type="file" accept="image/*" style="max-width:320px" onchange="fundPhotoChanged()">
@@ -656,6 +916,26 @@ async function fundForm(tk){
   </div>
   <button style="margin-top:10px" onclick="saveFund('${tk}',${JSON.stringify(f.fields.map(x=>x[0]))
     .replaceAll('"',"'")})">Guardar fundamentales</button></div>`;
+}
+async function secFund(tk){
+  const st = $('#sec-status');
+  if(st) st.textContent = 'Descargando el 10-K de la SEC…';
+  let r;
+  try{
+    try{
+      r = await api(`/fundamentals/${encodeURIComponent(tk)}/sec`,{method:'POST',body:{}});
+    }catch(e){
+      if(e._status===409 && confirm(e.detail+'\n\n¿Reemplazar los datos actuales por los del 10-K?'))
+        r = await api(`/fundamentals/${encodeURIComponent(tk)}/sec`,{method:'POST',body:{replace_existing:true}});
+      else throw e;
+    }
+  }catch(e){
+    if(st) st.textContent = reviewError(e,'No se pudieron cargar los fundamentales de la SEC.');
+    return;
+  }
+  await fundForm(tk);
+  alert('Fundamentales cargados desde la SEC.\nFuente: '+r.source
+    +'\nCampos faltantes: '+((r.missing||[]).join(', ')||'ninguno'));
 }
 function fundPhotoChanged(){
   _fundPhotoVersion++;
@@ -734,93 +1014,56 @@ async function saveFund(tk, keys){
   keys.forEach(k=>{ const v=$('#f-'+k).value.trim(); if(v!=='') data[k]=isNaN(+v)?v:+v; });
   try{
     await api('/fundamentals/'+tk,{method:'PUT',body:{data,source:$('#f-source').value,asof:$('#f-asof').value}});
-    alert('Guardado. Vuelve a Analizar.'); analisis(tk);
+    alert('Guardado.');
+    if($('#tc-go')) tradeCheck(); else analisis(tk);
   }catch(e){ alert(e.detail||'Error'); }
 }
 
-/* ---------- 4. Comparador ---------- */
-async function comparador(){
-  const pf = await api('/portfolio');
-  $('#view').innerHTML = `
-  <h2>Comparador de alternativas</h2>
-  <p class="sub">Genera el análisis de cada posición y compara las decisiones propuestas lado a lado.</p>
-  <div class="card"><button onclick="runCompare()">Comparar todas las posiciones</button></div>
-  <div id="cmp-out"></div>${DISC}`;
-}
-async function runCompare(){
-  const pf = await api('/portfolio');
-  $('#cmp-out').innerHTML = '<p class="mut">Analizando todas las posiciones…</p>';
-  const results = [];
-  for(const p of pf.positions){
-    try{ results.push(await api('/analysis/'+p.ticker,{method:'POST',body:{}})); }
-    catch(e){ results.push({ticker:p.ticker, error:e.detail}); }
-  }
-  $('#cmp-out').innerHTML = `<div class="card"><table>
-    <tr><th>Ticker</th><th>Peso</th><th>Resultado</th><th>Margen seg. (base)</th><th>Decisión propuesta</th><th>Confianza</th><th>Argumento principal</th></tr>
-    ${results.map(r=> r.error? `<tr><td>${r.ticker}</td><td colspan="6" class="warn sm">${esc(r.error)}</td></tr>` : `<tr>
-      <td><a href="#analisis/${r.ticker}"><b>${r.ticker}</b></a></td>
-      <td>${fmt(r.peso_en_cartera_pct,1)} %</td>
-      <td class="${cls(r.resultado)}">$ ${fmt(r.resultado)}</td>
-      <td>${r.valoracion.calculable? fmt(r.valoracion.escenarios.base.margen_de_seguridad_pct,1)+' %':'<span class="pill warn">faltan datos</span>'}</td>
-      <td><span class="pill">${esc(r.decision.decision_propuesta.replaceAll('_',' '))}</span></td>
-      <td>${esc(r.decision.nivel_confianza)}</td>
-      <td class="sm mut">${esc((r.decision.argumentos[0]||'').slice(0,120))}</td></tr>`).join('')}
-  </table></div>`;
-}
+/* ---------- 4. Oportunidades (radar) ---------- */
+const RD_LABELS = {barata_y_buena:'Barata y buena',precio_justo:'Precio justo',
+  buena_pero_cara:'Buena pero cara',cuidado:'Cuidado',faltan_datos:'Faltan datos'};
+const RD_PILL = {barata_y_buena:'ok',precio_justo:'',buena_pero_cara:'warn',cuidado:'warn',faltan_datos:'mut'};
+let _rdMsg = '', _rdErrs = [];
 
-/* ---------- 5. Simulador ---------- */
-async function simulador(){
-  const pf = await api('/portfolio');
-  $('#view').innerHTML = `
-  <h2>Simulador de escenarios</h2>
-  <p class="sub">Simulación aritmética sobre tus datos. No es una predicción; los supuestos siempre se muestran.</p>
-  <div class="card"><h3>Variaciones de precio</h3>
-    ${pf.positions.map(p=>`<div class="row"><span style="width:60px"><b>${p.ticker}</b></span>
-      <input id="sim-${p.ticker}" type="number" style="width:110px" placeholder="%" value="0"> <span class="sm mut">% de variación</span></div>`).join('')}
-    <h3 style="margin-top:12px">Operación simulada (opcional)</h3>
-    <div class="row">
-      <select id="sim-side" style="width:120px"><option value="">ninguna</option><option value="comprar">comprar</option><option value="vender">vender</option></select>
-      <input id="sim-tk" placeholder="Ticker" style="width:100px">
-      <input id="sim-amt" type="number" placeholder="USD" style="width:110px">
-      <span class="sm mut">Efectivo disponible: $ ${fmt(pf.cash)}</span>
-    </div>
-    <div class="row" style="margin-top:10px">
-      <button onclick="runSim()">Simular</button>
-      <button class="mini sec" onclick="preset(-10)">Todos −10%</button>
-      <button class="mini sec" onclick="preset(-20)">−20%</button>
-      <button class="mini sec" onclick="preset(-30)">−30%</button>
-      <button class="mini sec" onclick="preset(15)">Recuperación +15%</button>
-    </div></div>
-  <div id="sim-out"></div>${DISC}`;
-  window._simTk = pf.positions.map(p=>p.ticker);
-}
-function preset(v){ window._simTk.forEach(t=>{ $('#sim-'+t).value=v; }); runSim(); }
-async function runSim(){
-  const changes = {}; window._simTk.forEach(t=>{ const v=+$('#sim-'+t).value; if(v) changes[t]=v; });
-  const trades = [];
-  if($('#sim-side').value && $('#sim-tk').value && +$('#sim-amt').value)
-    trades.push({ticker:$('#sim-tk').value, side:$('#sim-side').value, amount_usd:+$('#sim-amt').value});
-  let r;
-  try{ r = await api('/simulate',{method:'POST',body:{changes,trades}}); }
-  catch(e){ $('#sim-out').innerHTML=`<div class="alert riesgo_elevado">${esc(e.detail||'No se pudo simular. Revisa tus precios.')}</div>`; return; }
-  $('#sim-out').innerHTML = `<div class="card"><h3>Resultado simulado</h3>
-    <div class="grid g3">
-      <div><div class="mut sm">Valor final estimado</div><div class="big">$ ${fmt(r.valor_final_estimado)}</div></div>
-      <div><div class="mut sm">Efectivo final</div><div class="big">$ ${fmt(r.efectivo_final)}</div></div>
-      <div><div class="mut sm">HHI resultante</div><div class="big">${r.hhi_resultante}</div></div>
-    </div>
-    <p class="sm"><b>Concentración resultante:</b> ${r.concentracion_resultante.map(w=>`${w.ticker} ${w.peso_pct}%`).join(' · ')||'—'}</p>
-    <p class="sm"><b>Supuestos aplicados:</b></p><ul class="sm">${r.supuestos.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>
-    <p class="sm mut">${esc(r.nota)}</p></div>`;
-}
-
-/* ---------- 6. Oportunidades ---------- */
 async function oportunidades(){
-  const r = await api('/candidates');
+  const [r, cands] = await Promise.all([api('/radar'), api('/candidates')]);
+  const notas = (cands.candidates||[]).filter(c=>Object.keys(c.data||{}).length||c.source!=='radar');
   $('#view').innerHTML = `
-  <h2>Buscador de oportunidades</h2>
-  <p class="sub">${esc(r.nota)}</p>
-  <div class="card"><h3>Agregar candidato (con tus datos y fuente)</h3>
+  <h2>Radar de oportunidades</h2>
+  <p class="sub">El sistema puntúa ${r.universo} empresas grandes + las que agregues + tu cartera,
+    con precio real y datos del 10-K de la SEC. Tú decides.</p>
+  <div class="card"><div class="row">
+    <div style="width:170px"><input id="rd-tk" placeholder="Ticker (p. ej. KO)" style="text-transform:uppercase"></div>
+    <button type="button" onclick="rdAdd()">Agregar a mi radar</button>
+    <button type="button" class="sec" onclick="rdRefresh()">Buscar oportunidades ahora</button>
+    </div>
+    <p id="rd-status" class="sm mut" role="status" style="margin-top:8px">${esc(_rdMsg)}</p>
+    ${_rdErrs.map(e=>`<p class="sm mut" style="margin:2px 0">${esc(e.ticker)}: ${esc(e.error)}</p>`).join('')}
+  </div>
+  <div class="card"><table><tr><th>Ticker</th><th>Precio</th><th>Calidad</th><th>Margen seg.</th><th>P/E</th><th>Crec. ing.</th><th>Veredicto</th><th></th></tr>
+    ${r.items.map(it=>{
+      const falta = it.veredicto==='faltan_datos'
+        ? [!it.fund&&'sin 10-K en la SEC', !it.price&&'sin precio'].filter(Boolean).join(' · ') : '';
+      return `<tr style="cursor:pointer" onclick="location.hash='#analisis/${it.ticker}'">
+      <td><b>${esc(it.ticker)}</b>
+        ${it.en_cartera?'<span class="pill mut" style="font-size:11px;padding:1px 8px">en cartera</span>':''}
+        ${it.en_watchlist?'<span class="pill mut" style="font-size:11px;padding:1px 8px">mi radar</span>':''}<br>
+        <span class="sm mut">${esc(it.sector)}</span></td>
+      <td>${it.price?`$ ${fmt(it.price.price)}<br><span class="sm mut">${esc(it.price.asof||'')} · ${esc(it.price.status)}</span>`:'—'}</td>
+      <td>${it.calidad==null?'—':fmt(it.calidad,1)+'/10'}</td>
+      <td>${it.mos==null?'—':fmt(it.mos,1)+' %'}</td>
+      <td>${it.pe==null?'—':fmt(it.pe,1)}</td>
+      <td>${it.crec==null?'—':fmt(it.crec,1)+' %'}</td>
+      <td><span class="pill ${RD_PILL[it.veredicto]||''}" title="${esc((it.motivos||[]).join(' · '))}">${RD_LABELS[it.veredicto]||esc(it.veredicto)}</span>
+        ${falta?`<br><span class="sm mut">${esc(falta)}</span>`:''}
+        ${(it.motivos||[]).length?`<br><span class="sm mut">${esc(it.motivos.join(' · '))}</span>`:''}</td>
+      <td>${it.en_watchlist?`<button class="mini danger" onclick="event.stopPropagation();rdQuitar(${it.candidate_id})">Quitar</button> `:''}
+        <a class="mini" href="#analisis/${it.ticker}" onclick="event.stopPropagation()">Ver</a></td>
+      </tr>`;}).join('')}
+    </table>
+    <p class="sm mut">${esc(r.nota)}</p></div>
+  <details class="card"><summary>Mis candidatos con notas propias (${notas.length})</summary>
+    <p class="sm mut">Candidatos que registraste con tus propias puntuaciones, tesis y fuente.</p>
     <div class="grid g3">
       <div><label>Ticker</label><input id="c-tk"></div>
       <div><label>Nombre</label><input id="c-name"></div>
@@ -834,18 +1077,41 @@ async function oportunidades(){
       <div><label>Condición de entrada</label><input id="c-ent"></div>
       <div><label>Condición de invalidación</label><input id="c-inv"></div>
     </div>
-    <button style="margin-top:10px" onclick="addCand()">Agregar al ranking</button></div>
-  <div class="card"><h3>Ranking (${r.candidates.length})</h3>
-    <table><tr><th>#</th><th>Ticker</th><th>Puntaje</th><th>Tesis</th><th>Condiciones</th><th>Fuente</th><th></th></tr>
-    ${r.candidates.map((c,i)=>`<tr><td>${i+1}</td><td><b>${c.ticker}</b><br><span class="sm mut">${esc(c.name||'')}</span></td>
+    <button style="margin-top:10px" onclick="addCand()">Agregar candidato</button>
+    ${notas.length?`<table style="margin-top:14px"><tr><th>#</th><th>Ticker</th><th>Puntaje</th><th>Tesis</th><th>Condiciones</th><th>Fuente</th><th></th></tr>
+    ${notas.map((c,i)=>`<tr><td>${i+1}</td><td><b>${esc(c.ticker)}</b><br><span class="sm mut">${esc(c.name||'')}</span></td>
       <td><b>${c.ranking_score??'—'}</b></td>
       <td class="sm">${esc(c.data.tesis||'')}</td>
       <td class="sm">entrada: ${esc(c.data.condicion_entrada||'—')}<br>invalida: ${esc(c.data.condicion_invalidacion||'—')}</td>
       <td class="sm mut">${esc(c.source)}</td>
       <td><button class="mini danger" onclick="delCand(${c.id})">✕</button></td></tr>`).join('')}
-    </table>
-    <p class="sm mut">Compara contra tus posiciones actuales en el Comparador antes de sustituir.</p></div>${DISC}`;
+    </table>`:'<p class="sm mut" style="margin-top:12px">Todavía no tienes candidatos con notas propias.</p>'}
+  </details>${DISC}`;
+  _rdMsg = ''; _rdErrs = [];
 }
+async function rdAdd(){
+  const tk = ($('#rd-tk').value||'').trim().toUpperCase();
+  const st = $('#rd-status');
+  if(!tk){ st.textContent = 'Escribe un ticker.'; return; }
+  st.textContent = `Agregando ${tk}: descargando su precio y su 10-K…`;
+  try{
+    const r = await api('/radar/'+encodeURIComponent(tk),{method:'POST'});
+    _rdErrs = r.errores||[];
+    _rdMsg = _rdErrs.length ? `${tk} agregado con avisos:` : `${tk} agregado a tu radar.`;
+    oportunidades();
+  }catch(e){ st.textContent = e.detail||'No se pudo agregar el ticker.'; }
+}
+async function rdRefresh(){
+  const st = $('#rd-status');
+  st.textContent = 'Descargando precios y 10-K… la primera vez puede tardar unos minutos';
+  try{
+    const r = await api('/radar/refresh',{method:'POST'});
+    _rdErrs = r.errores||[];
+    _rdMsg = `${r.precios} precios · ${r.fundamentales_nuevos} 10-K nuevos · ${r.errores.length} errores`;
+    oportunidades();
+  }catch(e){ st.textContent = e.detail||'No se pudo actualizar el radar.'; }
+}
+async function rdQuitar(id){ await api('/candidates/'+id,{method:'DELETE'}); oportunidades(); }
 async function delCand(id){ await api('/candidates/'+id,{method:'DELETE'}); oportunidades(); }
 async function addCand(){
   const data = {tesis:$('#c-tesis').value, catalizadores:$('#c-cat').value,
@@ -858,18 +1124,9 @@ async function addCand(){
   }catch(e){ alert(e.detail||'Error'); }
 }
 
-/* ---------- 7. Alertas ---------- */
-async function alertasView(){
-  const r = await api('/alerts');
-  $('#view').innerHTML = `
-  <h2>Alertas</h2><p class="sub">Clasificadas: informativa · revisión necesaria · riesgo elevado · acción pendiente · dato no verificado. Sin ruido por movimientos diarios irrelevantes (&lt;5%).</p>
-  ${r.alerts.length? r.alerts.map(a=>`<div class="alert ${a.level}"><span class="pill mut">${esc(a.level.replaceAll('_',' '))}</span> ${esc(a.text)}</div>`).join('')
-   :'<div class="card"><p class="mut">Sin alertas activas.</p></div>'}${DISC}`;
-}
-
 /* ---------- 8. Diario ---------- */
 async function diario(){
-  const r = await api('/journal');
+  const [r, d] = await Promise.all([api('/journal'), api('/decisions')]);
   $('#view').innerHTML = `
   <h2>Diario de inversión</h2>
   <p class="sub">Registra la tesis ANTES de operar y evalúa DESPUÉS el proceso, no solo el resultado: una decisión puede ser correcta y perder dinero (y viceversa).</p>
@@ -880,20 +1137,10 @@ async function diario(){
       <div><label>Fecha de revisión de la tesis</label><input id="j-rev" type="date"></div>
     </div>
     <div class="grid g2">
-      <div><label>Motivo *</label><textarea id="j-motivo"></textarea></div>
       <div><label>Tesis *</label><textarea id="j-tesis"></textarea></div>
       <div><label>Riesgos *</label><textarea id="j-riesgos"></textarea></div>
       <div><label>Condición de invalidación *</label><textarea id="j-inv"></textarea></div>
-    </div>
-    <div class="grid g3">
       <div><label>Precio</label><input id="j-precio" type="number" step="any"></div>
-      <div><label>Horizonte</label><input id="j-hor"></div>
-      <div><label>Catalizadores</label><input id="j-cat"></div>
-      <div><label>Condiciones de salida</label><input id="j-sal"></div>
-      <div><label>Pérdida tolerable</label><input id="j-perd"></div>
-      <div><label>Tamaño de posición</label><input id="j-tam"></div>
-      <div><label>Estado emocional</label><input id="j-emo" placeholder="tranquilo / FOMO / miedo…"></div>
-      <div><label>Fuentes consultadas</label><input id="j-fue"></div>
     </div>
     <button style="margin-top:10px" onclick="addJournal()">Registrar</button>
     <p class="sm mut">* obligatorios si la acción es una operación (comprar/vender/agregar/reducir).</p></div>
@@ -913,7 +1160,16 @@ async function diario(){
         <div><label>¿Se vendió por miedo?</label><select id="ev-miedo-${e.id}"><option>no</option><option>sí</option></select></div>
         <div><label>Lección</label><input id="ev-lec-${e.id}"></div></div>
         <button class="mini" style="margin-top:8px" onclick="evalJournal(${e.id})">Guardar evaluación</button></details>`}
-  </div>`).join('')}${DISC}`;
+  </div>`).join('')}
+  <div class="card"><h3>Historial de decisiones (${d.decisions.length})</h3>
+    <table><tr><th>Fecha</th><th>Ticker</th><th>Propuesta</th><th>Tu decisión</th><th>Contexto</th></tr>
+    ${d.decisions.map(x=>`<tr><td class="sm">${x.created_at.slice(0,16).replace('T',' ')}</td><td><b>${x.ticker}</b></td>
+      <td><span class="pill">${esc(x.proposal.decision)}</span> <span class="sm mut">conf. ${esc(x.proposal.confianza)}</span></td>
+      <td>${x.user_choice?`<b>${esc(x.user_choice)}</b>`:'<span class="mut sm">sin registrar</span>'}</td>
+      <td class="sm mut">peso ${fmt(x.proposal.peso,1)}% · margen ${x.proposal.margen_seguridad==null?'s/d':fmt(x.proposal.margen_seguridad,1)+'%'}
+        ${x.proposal.argumentos?.length?`<br><button class="mini sec" type="button" onclick="explainDecision(${x.id})">Explicar con Luna</button>
+          <div id="explain-${x.id}" class="assistant-answer sm" role="status"></div>`:
+          '<br>Propuesta antigua: no se guardaron los argumentos para explicarla.'}</td></tr>`).join('')}</table></div>${DISC}`;
 }
 async function challengeJournal(id){
   const output=$('#challenge-'+id);
@@ -928,11 +1184,9 @@ async function challengeJournal(id){
 async function addJournal(){
   try{
     await api('/journal',{method:'POST',body:{ticker:$('#j-tk').value,action:$('#j-act').value,
-      motivo:$('#j-motivo').value,tesis:$('#j-tesis').value,riesgos:$('#j-riesgos').value,
+      tesis:$('#j-tesis').value,riesgos:$('#j-riesgos').value,
       condicion_invalidacion:$('#j-inv').value,precio:$('#j-precio').value?+$('#j-precio').value:null,
-      horizonte:$('#j-hor').value,catalizadores:$('#j-cat').value,condiciones_salida:$('#j-sal').value,
-      perdida_tolerable:$('#j-perd').value,tamano_posicion:$('#j-tam').value,
-      estado_emocional:$('#j-emo').value,fuentes:$('#j-fue').value,review_date:$('#j-rev').value}});
+      review_date:$('#j-rev').value}});
     diario();
   }catch(e){ alert(e.detail||'Error'); }
 }
@@ -944,68 +1198,48 @@ async function evalJournal(id){
   diario();
 }
 
-/* ---------- 9. Historial ---------- */
-async function historial(){
-  const [d, a] = await Promise.all([api('/decisions'), api('/audit')]);
-  $('#view').innerHTML = `
-  <h2>Historial</h2><p class="sub">Decisiones propuestas vs. registradas, y registro de auditoría completo.</p>
-  <div class="card"><h3>Decisiones (${d.decisions.length})</h3>
-    <table><tr><th>Fecha</th><th>Ticker</th><th>Propuesta</th><th>Tu decisión</th><th>Contexto</th></tr>
-    ${d.decisions.map(x=>`<tr><td class="sm">${x.created_at.slice(0,16).replace('T',' ')}</td><td><b>${x.ticker}</b></td>
-      <td><span class="pill">${esc(x.proposal.decision)}</span> <span class="sm mut">conf. ${esc(x.proposal.confianza)}</span></td>
-      <td>${x.user_choice?`<b>${esc(x.user_choice)}</b>`:'<span class="mut sm">sin registrar</span>'}</td>
-      <td class="sm mut">peso ${fmt(x.proposal.peso,1)}% · margen ${x.proposal.margen_seguridad==null?'s/d':fmt(x.proposal.margen_seguridad,1)+'%'}
-        ${x.proposal.argumentos?.length?`<br><button class="mini sec" type="button" onclick="explainDecision(${x.id})">Explicar con Luna</button>
-          <div id="explain-${x.id}" class="assistant-answer sm" role="status"></div>`:
-          '<br>Propuesta antigua: no se guardaron los argumentos para explicarla.'}</td></tr>`).join('')}</table></div>
-  <div class="card"><h3>Auditoría</h3>
-    <table>${a.log.slice(0,40).map(l=>`<tr><td class="sm">${l.at.slice(0,16).replace('T',' ')}</td>
-      <td><span class="pill mut">${esc(l.action)}</span></td><td class="sm mut">${esc(l.detail||'')}</td></tr>`).join('')}</table></div>${DISC}`;
-}
-
-/* ---------- 10. Perfil de riesgo ---------- */
-const PROFILE_LABELS = {capital_total:'Capital total (USD)',capital_disponible:'Capital disponible para invertir',
-  aporte_mensual:'Aporte mensual',fondo_emergencia:'¿Tienes fondo de emergencia? (sí/no/meses)',moneda:'Moneda principal',
-  horizonte_anios:'Horizonte de inversión (años)',objetivo:'Objetivo financiero',rentabilidad_esperada_pct:'Rentabilidad esperada %',
-  perdida_maxima_pct:'Pérdida máxima tolerable %',necesita_retirar:'¿Necesitarás retirar el dinero? (cuándo)',
-  experiencia:'Experiencia invirtiendo',nivel_riesgo:'Nivel de riesgo (conservador/moderado/agresivo)',
-  ingresos_estables:'Ingresos y estabilidad financiera',max_por_empresa_pct:'Máximo % por empresa',
-  max_por_sector_pct:'Máximo % por sector',prefiere_fondos:'¿Prefieres acciones o fondos diversificados?',
-  restricciones:'Restricciones personales',comisiones_impuestos:'Comisiones e impuestos aplicables'};
-async function perfil(){
-  const r = await api('/profile');
-  $('#view').innerHTML = `
-  <h2>Perfil de riesgo del inversionista</h2>
-  <p class="sub">${r.complete?'✅ Perfil completo: las recomendaciones pueden personalizarse.':'⚠️ Perfil incompleto: los análisis serán informativos, no recomendaciones personalizadas.'}</p>
-  <div class="card"><div class="grid g3">
-    ${r.fields.map(f=>`<div><label>${PROFILE_LABELS[f]||f}</label><input id="rp-${f}" value="${esc(r.profile[f]??'')}"></div>`).join('')}
-  </div><button style="margin-top:12px" onclick="saveProfile()">Guardar perfil</button></div>${DISC}`;
-  window._rpFields = r.fields;
+/* ---------- 10. Ajustes (perfil, límites, datos) ---------- */
+const PROFILE_LABELS = {horizonte_anios:'Horizonte de inversión (años)',objetivo:'Objetivo financiero',
+  perdida_maxima_pct:'Pérdida máxima tolerable %',nivel_riesgo:'Nivel de riesgo'};
+function profileFormHtml(r){
+  return `<div class="grid g2">${r.fields.map(f=> f==='nivel_riesgo'
+    ? `<div><label>${PROFILE_LABELS[f]}</label><select id="rp-${f}">${['','conservador','moderado','agresivo'].map(v=>`<option value="${v}" ${v===(r.profile[f]??'')?'selected':''}>${v||'Elige…'}</option>`).join('')}</select></div>`
+    : `<div><label>${PROFILE_LABELS[f]||f}</label><input id="rp-${f}" value="${esc(r.profile[f]??'')}"></div>`).join('')}
+  </div><button style="margin-top:12px" onclick="saveProfile()">Guardar perfil</button>`;
 }
 async function saveProfile(){
-  const body = {}; window._rpFields.forEach(f=>{ body[f]=$('#rp-'+f).value; });
-  const r = await api('/profile',{method:'PUT',body});
-  alert(r.complete?'Perfil completo ✅':'Guardado. Faltan: '+r.missing.join(', ')); perfil();
+  const body = {}; (window._rpFields||[]).forEach(f=>{ const el=$('#rp-'+f); if(el) body[f]=el.value; });
+  await api('/profile',{method:'PUT',body});
+  route();
 }
 
 /* ---------- 11. Configuración (límites de riesgo) ---------- */
 const LIMIT_LABELS = {max_position_pct:'Máximo % por empresa',max_sector_pct:'Máximo % por sector',
   max_trade_pct:'Máximo % por operación',max_tolerable_loss_pct:'Pérdida máxima tolerable %',
   min_cash_reserve:'Reserva mínima de efectivo (USD)',max_trades_per_month:'Máx. operaciones al mes'};
-async function config(){
-  const s = await api('/settings');
+async function ajustes(){
+  const [s, prof, pf] = await Promise.all([api('/settings'), api('/profile'), api('/portfolio')]);
+  const n = pf.positions.length;
+  const limitWarn = n && s.limits.max_position_pct < 100/n
+    ? `<div class="alert">Con ${n} posiciones, cada una pesa en promedio ${fmt(100/n,0)} %. Si tu máximo por empresa es menor, verás alertas permanentes y el motor propondrá reducir.</div>` : '';
   $('#view').innerHTML = `
-  <h2>Configuración</h2><p class="sub">Reglas de riesgo que alimentan alertas y el motor de decisiones.</p>
-  <div class="card"><h3>Límites de riesgo</h3><div class="grid g3">
+  <h2>Ajustes</h2><p class="sub">Tu perfil y las reglas de riesgo que alimentan alertas y el motor de decisiones.</p>
+  <div class="card"><h3>Perfil de riesgo</h3>
+    <p class="sm mut">${prof.complete?'Perfil completo: las recomendaciones pueden personalizarse.':'Perfil incompleto: los análisis serán informativos, no recomendaciones personalizadas.'}</p>
+    ${profileFormHtml(prof)}</div>
+  <div class="card"><h3>Límites de riesgo</h3>
+    ${limitWarn}
+    <div class="grid g3">
     ${Object.entries(s.limits).map(([k,v])=>`<div><label>${LIMIT_LABELS[k]||k}</label><input id="lm-${k}" type="number" step="any" value="${v}"></div>`).join('')}
   </div><button style="margin-top:12px" onclick="saveLimits(${JSON.stringify(Object.keys(s.limits)).replaceAll('"',"'")})">Guardar límites</button></div>
   <div class="card"><h3 style="color:var(--err)">Zona de peligro</h3>
-    <p class="sm">Elimina posiciones, fundamentales, diario, decisiones, candidatos y auditoría.</p>
+    <p class="sm">Elimina posiciones, fundamentales, operaciones, diario, decisiones y candidatos.</p>
     <button class="danger" onclick="wipe()">Eliminar todos mis datos</button></div>${DISC}`;
+  window._rpFields = prof.fields;
 }
 async function saveLimits(keys){
   const body={}; keys.forEach(k=>{ body[k]=+$('#lm-'+k).value; });
-  await api('/limits',{method:'PUT',body}); alert('Límites guardados'); config();
+  await api('/limits',{method:'PUT',body}); alert('Límites guardados'); ajustes();
 }
 async function wipe(){
   if(prompt('Irreversible. Escribe ELIMINAR:')==='ELIMINAR'){
@@ -1013,4 +1247,4 @@ async function wipe(){
   }
 }
 
-api('/me').then(showApp).catch(showLogin);
+route();

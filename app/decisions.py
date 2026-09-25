@@ -12,12 +12,7 @@ disponibles. Reglas duras:
 ACTIONS = ["comprar", "agregar_gradualmente", "mantener", "reducir", "vender", "esperar",
            "sustituir", "mantener_efectivo"]
 
-RISK_PROFILE_FIELDS = [
-    "capital_total", "capital_disponible", "aporte_mensual", "fondo_emergencia", "moneda",
-    "horizonte_anios", "objetivo", "rentabilidad_esperada_pct", "perdida_maxima_pct",
-    "necesita_retirar", "experiencia", "nivel_riesgo", "ingresos_estables",
-    "max_por_empresa_pct", "max_por_sector_pct", "prefiere_fondos", "restricciones", "comisiones_impuestos",
-]
+RISK_PROFILE_FIELDS = ["horizonte_anios", "objetivo", "perdida_maxima_pct", "nivel_riesgo"]
 
 
 def profile_completeness(profile: dict) -> dict:
@@ -31,6 +26,9 @@ def averaging_down_checklist(ctx: dict) -> list:
     mos = ctx.get("margin_of_safety_pct")
     weight = ctx.get("weight_pct")
     max_w = ctx.get("max_position_pct", 25)
+    mv = ctx.get("market_value")
+    caidas = (f"-10%: ${mv * 0.9:,.0f} · -20%: ${mv * 0.8:,.0f} · -30%: ${mv * 0.7:,.0f}"
+              if mv else "Valor de la posición no calculable")
     items = [
         ("¿La tesis sigue vigente?", "Sí, hay una tesis registrada y sin invalidación" if ctx.get("has_thesis")
          else "SIN RESPONDER: no hay tesis registrada en el diario — regístrala antes de agregar"),
@@ -45,10 +43,12 @@ def averaging_down_checklist(ctx: dict) -> list:
          f"Pesa {weight:.1f}% (límite configurado: {max_w}%) — {'EXCEDE el límite' if weight and weight > max_w else 'dentro del límite'}"
          if weight is not None else "Peso no calculable"),
         ("¿Existe una oportunidad mejor?", "Compara en el Buscador de oportunidades"),
-        ("¿Puedes soportar una caída adicional?", "Revisa el simulador de escenarios (-10/-20/-30%)"),
+        ("¿Puedes soportar una caída adicional?",
+         f"Un -30% adicional serían ≈ ${mv * 0.3:,.0f} menos sobre esta posición" if mv else
+         "No calculable sin valor de la posición"),
         ("¿El horizonte es suficiente?", f"Horizonte declarado: {ctx.get('horizonte', 'SIN REGISTRAR')}"),
         ("¿Hay resultados financieros próximos?", ctx.get("next_earnings") or "Fecha de próximos resultados no registrada"),
-        ("¿Qué pasaría si cae 10/20/30% más?", "Ver simulador — las cifras están en la pestaña Escenarios"),
+        ("¿Qué pasaría si cae 10/20/30% más?", caidas),
     ]
     return [{"pregunta": q, "respuesta": a} for q, a in items]
 
@@ -129,6 +129,9 @@ def evaluate_position(ctx: dict) -> dict:
         decision, conf = "mantener", "media"
         args = ["Sin señal fuerte de valoración ni incumplimiento de límites: mantener y revisar en la próxima fecha"]
 
+    if not ctx.get("qty") and decision in ("mantener", "reducir", "vender"):
+        decision = "esperar"
+        args.append("No tienes esta acción: con estos datos, la alternativa a comprar es esperar")
     if not ctx.get("profile_complete"):
         conf = "baja"
         args.append("AVISO: tu perfil de inversionista está incompleto; esta salida es informativa, no una recomendación personalizada")
@@ -143,53 +146,4 @@ def evaluate_position(ctx: dict) -> dict:
         "nivel_confianza": conf,
         "checklist_promediar": averaging_down_checklist(ctx) if (ctx.get("unrealized_pl") or 0) < 0 else None,
         "nota": "Apoyo a la decisión, no asesoría financiera regulada. Ninguna operación se ejecuta automáticamente.",
-    }
-
-
-def simulate(positions: list, cash: float, changes: dict, trades: list) -> dict:
-    """Módulo 9: simulador. changes: {ticker: variación_%}; trades: [{ticker, side, amount_usd}]."""
-    sim = {p["ticker"]: dict(p) for p in positions}
-    sim_cash = cash or 0.0
-    assumptions = []
-    for t in trades or []:
-        tk, amt = t["ticker"].upper(), float(t.get("amount_usd") or 0)
-        if t.get("side") == "comprar":
-            if amt > sim_cash:
-                assumptions.append(f"Compra de {tk} recortada al efectivo disponible ({sim_cash:.2f})")
-                amt = sim_cash
-            sim_cash -= amt
-            if tk in sim:
-                sim[tk]["market_value"] = (sim[tk].get("market_value") or 0) + amt
-            else:
-                sim[tk] = {"ticker": tk, "market_value": amt, "invested": amt, "sector": None}
-            assumptions.append(f"Compra simulada de {amt:.2f} USD en {tk} (sin comisiones ni impuestos, salvo que los configures)")
-        else:
-            have = sim.get(tk, {}).get("market_value") or 0
-            if have <= 0:
-                # No se puede vender lo que no se tiene (o cuyo valor es cero): se ignora
-                # en vez de crashear con KeyError al indexar una posición inexistente.
-                assumptions.append(f"Venta simulada de {tk} ignorada: no tienes esa posición o su valor es cero")
-                continue
-            amt = min(amt, have)
-            sim[tk]["market_value"] = have - amt
-            sim_cash += amt
-            assumptions.append(f"Venta simulada de {amt:.2f} USD en {tk}")
-    for tk, pct in (changes or {}).items():
-        tk = tk.upper()
-        if tk in sim and sim[tk].get("market_value"):
-            sim[tk]["market_value"] = sim[tk]["market_value"] * (1 + float(pct) / 100)
-            assumptions.append(f"{tk}: variación simulada de {float(pct):+.1f}%")
-    final_positions = [p for p in sim.values() if (p.get("market_value") or 0) > 0.005]
-    total = sum(p["market_value"] for p in final_positions) + sim_cash
-    costs_complete = all(p.get("invested") is not None for p in final_positions)
-    invested = sum(p.get("invested") or 0 for p in final_positions)
-    weights = [{"ticker": p["ticker"], "peso_pct": round(p["market_value"] / total * 100, 2)}
-               for p in final_positions] if total > 0 else []
-    hhi = round(sum(w["peso_pct"] ** 2 for w in weights)) if weights else 0
-    return {
-        "valor_final_estimado": round(total, 2), "efectivo_final": round(sim_cash, 2),
-        "resultado_vs_invertido": round(total - invested - sim_cash, 2) if invested and costs_complete else None,
-        "concentracion_resultante": weights, "hhi_resultante": hhi,
-        "supuestos": assumptions or ["Sin cambios aplicados"],
-        "nota": "Simulación aritmética sobre tus datos; no es una predicción de mercado.",
     }

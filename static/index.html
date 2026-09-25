@@ -7,38 +7,18 @@
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<div id="login" class="card">
-  <h2>Tu cartera merece datos claros.</h2>
-  <p class="sub">Inversor Hapi IA reúne tus posiciones, fuentes y riesgos antes de proponerte una decisión. Nunca opera por ti.</p>
-  <form onsubmit="event.preventDefault();doLogin()">
-    <label for="l-email">Correo</label><input id="l-email" type="email" autocomplete="username" required>
-    <label for="l-pass">Contraseña (mín. 8 caracteres)</label><input id="l-pass" type="password" autocomplete="current-password" required>
-    <div class="row" style="margin-top:18px"><button type="submit">Entrar a mi cartera</button>
-    <button type="button" class="sec" onclick="doRegister()">Crear cuenta</button></div>
-  </form>
-  <p id="l-msg" class="sm" role="status" style="color:var(--err)"></p>
-</div>
-
-<div id="layout" class="hidden">
+<div id="layout">
 <nav aria-label="Navegación principal">
   <h1>Inversor <span>Hapi IA</span></h1>
   <div class="nav-links">
-    <div class="nav-group"><div class="nav-title">Cartera y decisiones</div>
-      <a href="#inicio">Resumen</a>
-      <a href="#cartera">Posiciones y precios</a>
-      <a href="#analisis">Analizar un activo</a>
-      <a href="#comparador">Comparar alternativas</a>
-      <a href="#simulador">Simular escenarios</a>
+    <div class="nav-group"><div class="nav-title">Mi inversión</div>
+      <a href="#inicio">Hoy</a>
+      <a href="#cartera">Cartera</a>
+      <a href="#analisis">¿Compro o vendo?</a>
+      <a href="#diario">Diario</a>
       <a href="#oportunidades">Oportunidades</a></div>
-    <div class="nav-group"><div class="nav-title">Seguimiento</div>
-      <a href="#alertas">Alertas</a>
-      <a href="#diario">Diario de inversión</a>
-      <a href="#historial">Historial</a>
-      <a href="#asistente">Consultar a Luna</a></div>
-    <div class="nav-group"><div class="nav-title">Mi cuenta</div>
-      <a href="#perfil">Perfil de riesgo</a>
-      <a href="#config">Configuración</a>
-      <a href="#" onclick="logout();return false">Salir</a></div>
+    <div class="nav-group"><div class="nav-title">Configuración</div>
+      <a href="#ajustes">Ajustes</a></div>
   </div>
 </nav>
 <main id="view"></main>

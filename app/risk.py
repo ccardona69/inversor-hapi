@@ -7,11 +7,11 @@ DEFAULT_LIMITS = {
 
 # Sectores conocidos para los tickers frecuentes; el usuario puede corregirlos.
 KNOWN_SECTORS = {"NVDA": "Tecnología (semiconductores/IA)", "MSFT": "Tecnología (software/nube/IA)",
-                 "AAPL": "Tecnología", "GOOGL": "Tecnología", "AMZN": "Consumo/Tecnología",
-                 "META": "Tecnología", "TSLA": "Automotriz/Tecnología"}
+                 "AAPL": "Tecnología", "GOOGL": "Tecnología", "GOOG": "Tecnología",
+                 "AMZN": "Consumo/Tecnología", "META": "Tecnología", "TSLA": "Automotriz/Tecnología"}
 
 CORRELATED_GROUPS = [
-    ({"NVDA", "MSFT", "AAPL", "GOOGL", "AMZN", "META", "AMD", "TSM", "AVGO"},
+    ({"NVDA", "MSFT", "AAPL", "GOOGL", "GOOG", "AMZN", "META", "AMD", "TSM", "AVGO"},
      "tecnología / tendencia de inteligencia artificial"),
 ]
 

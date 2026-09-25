@@ -10,6 +10,8 @@ from .. import analysis as AN
 from .. import db as D
 from .. import fundsync as FS
 from .. import marketdata as MD
+from .. import marketpulse as MP
+from .. import secdata as SEC
 from .. import tradesync as TS
 from ..deps import _photo_input, conn_dep, current_user
 from .portfolio import position_rows
@@ -31,6 +33,11 @@ class FundamentalsIn(BaseModel):
     asof: str
 
 
+def store_quote(conn, q):
+    conn.execute("INSERT INTO prices (ticker, price, currency, asof, source, day_change_pct, created_at) VALUES (?,?,?,?,?,?,?)",
+                 (q["ticker"], q["price"], q["currency"], q["asof"], q["source"], q["day_change_pct"], D.now()))
+
+
 @router.post("/api/prices/refresh")
 def prices_refresh(uid: int = Depends(current_user), conn=Depends(conn_dep)):
     results, errors = [], []
@@ -39,12 +46,10 @@ def prices_refresh(uid: int = Depends(current_user), conn=Depends(conn_dep)):
     for tk in sorted(tickers):
         try:
             q = MD.fetch_quote(tk)
-            conn.execute("INSERT INTO prices (ticker, price, currency, asof, source, day_change_pct, created_at) VALUES (?,?,?,?,?,?,?)",
-                         (tk, q["price"], q["currency"], q["asof"], q["source"], q["day_change_pct"], D.now()))
+            store_quote(conn, {**q, "ticker": tk})
             results.append(q)
         except MD.MarketDataError as e:
             errors.append({"ticker": tk, "error": str(e)})
-    D.audit(conn, uid, "precios_actualizados", f"{len(results)} ok, {len(errors)} errores")
     return {"updated": results, "errors": errors}
 
 
@@ -59,8 +64,35 @@ def price_manual(body: ManualPrice, uid: int = Depends(current_user), conn=Depen
         raise HTTPException(400, "Indica una fecha válida que no esté en el futuro")
     conn.execute("INSERT INTO prices (ticker, price, currency, asof, source, created_at) VALUES (?,?,?,?,?,?)",
                  (body.ticker.upper().strip(), body.price, body.currency, body.asof, body.source.strip(), D.now()))
-    D.audit(conn, uid, "precio_manual", f"{body.ticker} {body.price}")
     return {"ok": True}
+
+
+# ---------- pulso de mercado y niveles por acción (regla técnica, no predicción) ----------
+
+def _clear_cache():
+    MP._clear_cache()
+
+
+@router.get("/api/market/pulse")
+def market_pulse(uid: int = Depends(current_user)):
+    return MP.cached_pulse()
+
+
+@router.get("/api/levels/{ticker}")
+def levels_get(ticker: str, uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    tk = ticker.strip().upper()
+    if not TS.TICKER.fullmatch(tk):
+        raise HTTPException(400, "Ticker inválido")
+    try:
+        base, fresh = MP.cached_levels(tk)
+    except MD.MarketDataError as e:
+        raise HTTPException(400, f"No se pudo obtener el precio de {tk}: {e}") from e
+    if fresh:
+        store_quote(conn, {**base["quote"], "ticker": tk})
+    pos = next((p for p in position_rows(conn, uid) if p["ticker"] == tk), None)
+    posicion = (MP.posicion_vs_niveles(base["precio"]["valor"], base["niveles"], pos.get("avg_cost"), pos.get("qty"))
+                if pos else None)
+    return {k: base[k] for k in ("ticker", "precio", "tecnica", "niveles", "fetched_at")} | {"posicion": posicion}
 
 
 # ---------- fundamentales ----------
@@ -86,7 +118,6 @@ def fundamentals_put(ticker: str, body: FundamentalsIn, uid: int = Depends(curre
                  "asof=excluded.asof, created_at=excluded.created_at, "
                  "period=NULL, unit=NULL, shares_unit=NULL",
                  (uid, ticker.upper(), json.dumps(body.data, ensure_ascii=False), body.source, body.asof, D.now()))
-    D.audit(conn, uid, "fundamentales_guardados", ticker)
     return {"ok": True}
 
 
@@ -134,7 +165,42 @@ def fundamentals_photo_save(ticker: str, body: dict, uid: int = Depends(current_
                  "shares_unit=excluded.shares_unit",
                  (uid, tk, json.dumps(data, ensure_ascii=False), source.strip(), asof, D.now(),
                   body["period"], body.get("unit"), body.get("shares_unit")))
-    D.audit(conn, uid, "fundamentales_foto_confirmados", f"{tk} {body['period']} {asof}; {source.strip()}")
     return {"ok": True, "ticker": tk, "fundamentals": data, "source": source.strip(),
             "asof": asof, "period": body["period"], "unit": body.get("unit"),
             "shares_unit": body.get("shares_unit")}
+
+
+def _sec_fundamentals(tk, conn, uid):
+    """Descarga y guarda los fundamentales del último 10-K. Solo la llama quien
+    ya comprobó que no hay fundamentales o que el usuario autorizó reemplazarlos."""
+    result = SEC.fetch_fundamentals(tk)
+    source = (f"SEC EDGAR — 10-K del ejercicio cerrado el {result['period_end']} "
+              f"(presentado {result['filed']}, accn {result['accn']}); "
+              "márgenes y crecimientos calculados con el mismo 10-K")
+    conn.execute("INSERT INTO fundamentals (user_id, ticker, data, source, asof, created_at, period, unit, shares_unit) "
+                 "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id, ticker) DO UPDATE SET "
+                 "data=excluded.data, source=excluded.source, asof=excluded.asof, "
+                 "created_at=excluded.created_at, period=excluded.period, unit=excluded.unit, "
+                 "shares_unit=excluded.shares_unit",
+                 (uid, tk, json.dumps(result["data"], ensure_ascii=False), source,
+                  result["period_end"], D.now(), "anual", "USD", "acciones"))
+    return {**result, "source": source}
+
+
+@router.post("/api/fundamentals/{ticker}/sec")
+def fundamentals_sec(ticker: str, body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    """Carga los fundamentales del 10-K más reciente publicado en la SEC."""
+    tk = ticker.strip().upper()
+    if not TS.TICKER.fullmatch(tk):
+        raise HTTPException(400, "Ticker inválido")
+    existing = conn.execute("SELECT source FROM fundamentals WHERE user_id=? AND ticker=?",
+                            (uid, tk)).fetchone()
+    if existing and body.get("replace_existing") is not True:
+        raise HTTPException(409, f"Ya hay fundamentales para {tk} (fuente: {existing['source']}). "
+                                 "Confirma para reemplazarlos por los del 10-K.")
+    try:
+        result = _sec_fundamentals(tk, conn, uid)
+    except SEC.SecDataError as exc:
+        raise HTTPException(exc.status, exc.detail) from exc
+    return {"ok": True, "ticker": tk, "fundamentals": result["data"], "source": result["source"],
+            "asof": result["period_end"], "missing": result["missing"], "detalle": result["detalle"]}

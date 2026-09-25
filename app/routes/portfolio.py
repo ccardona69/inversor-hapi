@@ -1,7 +1,8 @@
-"""Módulo 1: cartera — posiciones, efectivo, importación y sincronización por foto.
+"""Módulo 1: cartera — posiciones, efectivo y sincronización por foto.
 
 La IA de visión propone filas; el usuario siempre revisa y confirma antes de
-guardar, y todo entra marcado «pendiente de verificación».
+guardar, y todo entra marcado «pendiente de verificación» salvo que el usuario
+marque que revisó cada dato.
 """
 import math
 from typing import Optional
@@ -61,6 +62,7 @@ def enrich_positions(conn, uid):
             mv, basis = None, {"fuente": "sin precio disponible"}
         pl = round(mv - p["invested"], 2) if st["usable_as_current"] and p["invested"] is not None else None
         out.append({**p, "market_value": mv, "unrealized_pl": pl,
+                    "day_change_pct": price.get("day_change_pct") if price and st["usable_as_current"] else None,
                     "return_pct": round(pl / p["invested"] * 100, 2) if pl is not None and p["invested"] else None,
                     "price_info": basis, "price_status": st["status"]})
     return out
@@ -88,6 +90,12 @@ def portfolio(uid: int = Depends(current_user), conn=Depends(conn_dep)):
     complete = not missing_value and not missing_cost
     weights = {p["ticker"]: round(p["market_value"] / total_mv * 100, 2)
                for p in positions} if not missing_value and total_mv else {}
+    if positions and not missing_value and all(p["day_change_pct"] is not None for p in positions):
+        prev = sum(p["market_value"] / (1 + p["day_change_pct"] / 100) for p in positions)
+        cambio_dia = round(total_mv - prev, 2)
+        cambio_dia_pct = round((total_mv / prev - 1) * 100, 2) if prev else None
+    else:
+        cambio_dia = cambio_dia_pct = None
     return {
         "positions": positions, "cash": cash,
         "cash_currency": cash_row["currency"] if cash_row else "USD",
@@ -95,6 +103,7 @@ def portfolio(uid: int = Depends(current_user), conn=Depends(conn_dep)):
                    "valor_actual": round(total_mv, 2) if not missing_value else None,
                    "resultado": round(total_mv - invested, 2) if complete and invested else None,
                    "rendimiento_pct": round((total_mv / invested - 1) * 100, 2) if complete and invested else None,
+                   "cambio_dia": cambio_dia, "cambio_dia_pct": cambio_dia_pct,
                    "pesos_pct": weights, "sin_precio_vigente": missing_value, "sin_costo": missing_cost},
         "disclaimer": DISCLAIMER,
     }
@@ -122,14 +131,12 @@ def position_upsert(body: PositionIn, uid: int = Depends(current_user), conn=Dep
          avg, invested, body.hapi_value, body.hapi_pl, body.hapi_return_pct, body.source, body.notes,
          D.now(), D.now()),
     )
-    D.audit(conn, uid, "posicion_guardada", f"{tk} qty={body.qty}")
     return {"ok": True}
 
 
 @router.delete("/api/positions/{ticker}")
 def position_delete(ticker: str, uid: int = Depends(current_user), conn=Depends(conn_dep)):
     conn.execute("DELETE FROM positions WHERE user_id=? AND ticker=?", (uid, ticker.upper()))
-    D.audit(conn, uid, "posicion_borrada", ticker)
     return {"ok": True}
 
 
@@ -147,28 +154,8 @@ def cash_put(body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep
     return {"ok": True}
 
 
-@router.post("/api/seed_hapi")
-def seed_hapi(uid: int = Depends(current_user), conn=Depends(conn_dep)):
-    """Carga la cartera que el usuario reportó desde su app Hapi (2026-07-19).
-    Queda marcada como 'pendiente de verificación' hasta que el usuario la confirme."""
-    src = "Hapi — captura reportada por el usuario el 2026-07-19 (pendiente de verificación)"
-    for p in [
-        PositionIn(ticker="NVDA", name="NVIDIA", sector=RK.KNOWN_SECTORS["NVDA"], qty=1.54575,
-                   invested=335.37, avg_cost=216.96, hapi_value=313.49, hapi_pl=-21.88,
-                   hapi_return_pct=-6.52, source=src,
-                   notes="Derivados aproximados: verificar redondeos, comisiones e impuestos"),
-        PositionIn(ticker="MSFT", name="Microsoft", sector=RK.KNOWN_SECTORS["MSFT"], qty=0.27219,
-                   invested=118.44, avg_cost=435.14, hapi_value=107.19, hapi_pl=-11.25,
-                   hapi_return_pct=-9.50, source=src,
-                   notes="Derivados aproximados: verificar redondeos, comisiones e impuestos"),
-    ]:
-        position_upsert(p, uid, conn)
-    D.audit(conn, uid, "cartera_hapi_cargada", "NVDA + MSFT")
-    return {"ok": True, "detail": "Cartera cargada desde tu reporte de Hapi. Ejecuta la validación de datos."}
-
-
 def _upsert_rows(rows, uid, conn, source, capture_fields=False):
-    """Guarda filas ya revisadas (CSV o foto): valida ticker/cantidad, hace el
+    """Guarda filas ya revisadas (de la foto): valida ticker/cantidad, hace el
     upsert y reporta qué filas se omitieron y por qué."""
     importadas, omitidas = [], []
     for r in rows:
@@ -188,25 +175,6 @@ def _upsert_rows(rows, uid, conn, source, capture_fields=False):
         position_upsert(pin, uid, conn)
         importadas.append(tk)
     return importadas, omitidas
-
-
-@router.post("/api/positions/import")
-def positions_import(body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep)):
-    """Importa posiciones desde un archivo que el usuario exportó de su bróker.
-
-    El CSV/Excel se parsea en el navegador y aquí llegan filas ya mapeadas. NUNCA se
-    piden credenciales de Hapi ni se conecta a su cuenta: el usuario sube su propio
-    archivo. Todo entra marcado 'pendiente de verificación' (verified=0), como el resto.
-    """
-    rows = body.get("rows") or []
-    if not rows:
-        raise HTTPException(400, "No hay filas para importar")
-    source = "Hapi (CSV exportado por el usuario — pendiente de verificación)"
-    importadas, omitidas = _upsert_rows(rows, uid, conn, source)
-    D.audit(conn, uid, "cartera_importada_csv", f"{len(importadas)} importadas, {len(omitidas)} omitidas")
-    return {"ok": True, "importadas": importadas, "omitidas": omitidas,
-            "detail": f"{len(importadas)} posición(es) importada(s), marcadas «pendiente de verificación». "
-                      "Revísalas y confírmalas en la validación de datos."}
 
 
 # ---------- sincronización con Hapi por foto (IA de visión) ----------
@@ -230,22 +198,49 @@ def photo_analyze(body: dict, uid: int = Depends(current_user), conn=Depends(con
         result = PS.analyze(image, body.get("mime") or "image/jpeg")
     except PS.PhotoSyncError as e:
         raise HTTPException(502, str(e))
-    D.audit(conn, uid, "foto_analizada",
-            f"{len(result['rows'])} posiciones detectadas con {result['model']}")
     return result
 
 
 @router.post("/api/hapi/photo/save")
 def photo_save(body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep)):
-    """Guarda las filas confirmadas por el usuario tras revisar el análisis.
-    Todo entra con fuente (modelo IA + fecha) y «pendiente de verificación»."""
+    """Guarda las filas que el usuario revisó tras el análisis de la captura.
+
+    confirmed=True marca las filas importadas como verificadas; replace_all=True
+    borra además las posiciones que no aparecen en la captura. Reemplazar exige
+    confirmación y al menos una fila válida, y nada se escribe si falta alguna."""
     rows = body.get("rows") or []
     if not rows:
         raise HTTPException(400, "No hay filas para guardar")
+    confirmed = bool(body.get("confirmed"))
+    replace_all = bool(body.get("replace_all"))
+    if replace_all and not confirmed:
+        raise HTTPException(400, "Para reemplazar tu cartera, primero confirma que revisaste cada dato.")
+    if replace_all:
+        valid = []
+        for r in rows:
+            tk = str(r.get("ticker") or "").upper().strip()
+            try:
+                qty = float(r.get("qty"))
+            except (TypeError, ValueError):
+                qty = 0.0
+            if tk and qty > 0:
+                valid.append(tk)
+        if not valid:
+            raise HTTPException(400, "La captura no tiene filas válidas; no se puede reemplazar la cartera.")
     st = AP.config_status()
     model = st.get("model") or "modelo de visión"
     source = f"Hapi — captura analizada por IA ({model}, {D.now()[:10]}; pendiente de verificación)"
     importadas, omitidas = _upsert_rows(rows, uid, conn, source, capture_fields=True)
+    if confirmed and importadas:
+        marks = ",".join("?" * len(importadas))
+        conn.execute(f"UPDATE positions SET verified=1, updated_at=? WHERE user_id=? AND ticker IN ({marks})",
+                     (D.now(), uid, *importadas))
+    eliminadas = []
+    if replace_all:
+        keep = set(importadas)
+        eliminadas = sorted(p["ticker"] for p in position_rows(conn, uid) if p["ticker"] not in keep)
+        for tk in eliminadas:
+            conn.execute("DELETE FROM positions WHERE user_id=? AND ticker=?", (uid, tk))
     cash = body.get("cash")
     try:
         cash = float(cash) if cash is not None else None
@@ -255,13 +250,20 @@ def photo_save(body: dict, uid: int = Depends(current_user), conn=Depends(conn_d
         D.cash_upsert(conn, uid, cash)
     else:
         cash = None
-    D.audit(conn, uid, "cartera_sincronizada_foto",
-            f"{len(importadas)} importadas, {len(omitidas)} omitidas"
-            + (f", efectivo {cash}" if cash is not None else "") + f" ({model})")
-    return {"ok": True, "importadas": importadas, "omitidas": omitidas, "cash": cash,
-            "detail": f"{len(importadas)} posición(es) sincronizada(s) desde la foto"
-                      + (f" y efectivo actualizado a $ {cash:.2f}" if cash is not None else "")
-                      + ", marcadas «pendiente de verificación». Confírmalas en la validación de datos."}
+    detail = f"{len(importadas)} posición(es) sincronizada(s) desde la foto" \
+        + (" y confirmadas" if confirmed else ", marcadas «pendiente de verificación»") \
+        + (f" y efectivo actualizado a $ {cash:.2f}" if cash is not None else "") \
+        + (f"; se quitaron {len(eliminadas)} que no aparecían en la captura" if eliminadas else "") \
+        + ("." if confirmed else ". Confírmalas en la validación de datos.")
+    return {"ok": True, "importadas": importadas, "omitidas": omitidas,
+            "eliminadas": eliminadas, "cash": cash, "detail": detail}
+
+
+@router.post("/api/positions/verify_all")
+def verify_all(uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    cur = conn.execute("UPDATE positions SET verified=1, updated_at=? WHERE user_id=? AND verified=0",
+                       (D.now(), uid))
+    return {"ok": True, "confirmadas": cur.rowcount}
 
 
 # ---------- Módulo 2: validación ----------
@@ -313,5 +315,4 @@ def validate(uid: int = Depends(current_user), conn=Depends(conn_dep)):
 def verify_position(ticker: str, uid: int = Depends(current_user), conn=Depends(conn_dep)):
     conn.execute("UPDATE positions SET verified=1, updated_at=? WHERE user_id=? AND ticker=?",
                  (D.now(), uid, ticker.upper()))
-    D.audit(conn, uid, "posicion_verificada", ticker)
     return {"ok": True}

@@ -45,8 +45,6 @@
   .alert.riesgo_elevado{border-color:var(--err);background:#fff5f4}
   .alert.informativa{border-color:var(--acc);background:#f3faf8}
   pre{background:#f0f3f5;border-radius:8px;padding:12px;overflow:auto;font-size:12.5px;white-space:pre-wrap}
-  #login{max-width:455px;margin:min(12vh,110px) auto;border-top:5px solid var(--acc);padding:30px}
-  #login h2{font-size:29px;margin-bottom:14px}
   .qbox{border:1px solid var(--line);border-radius:10px;padding:11px;margin-bottom:9px;font-size:13.5px}
   .hidden,#layout.hidden{display:none}
   .disc{font-size:12px;color:var(--mut);border-top:1px solid var(--line);margin-top:20px;padding-top:10px}
@@ -69,6 +67,62 @@
   .review-check{display:flex;align-items:flex-start;gap:8px;color:var(--ink);font-size:13px;margin:12px 0}
   .review-check input{width:auto;flex:none;margin-top:3px}
   .review-output{white-space:pre-wrap;overflow-wrap:anywhere}
+  .luna-panel{background:#0e1f1c;color:#fff;border-radius:12px;border-left:5px solid #71d8bb;padding:24px 27px;margin:0 0 16px}
+  .luna-panel h3{font-size:20px;letter-spacing:-.02em;margin:0 0 12px}
+  .luna-log{display:flex;flex-direction:column;gap:10px;max-height:420px;overflow-y:auto;margin-bottom:12px}
+  .luna-msg{display:flex;flex-direction:column}
+  .luna-msg.user{align-items:flex-end}
+  .luna-msg.assistant{align-items:flex-start}
+  .luna-bubble{max-width:78%;padding:10px 14px;border-radius:14px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px}
+  .luna-msg.user .luna-bubble{background:#e5f3f0;color:#104438;border-bottom-right-radius:4px}
+  .luna-msg.assistant .luna-bubble{background:#173430;color:#fff;border-bottom-left-radius:4px}
+  .luna-meta{font-size:12px;color:#9ab9b0;margin-top:3px;padding:0 4px}
+  .luna-sugs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+  .luna-sugs button{background:transparent;border:1px solid #71d8bb;color:#d3e2dc;border-radius:99px;padding:5px 13px;font-size:13px;font-weight:500}
+  .luna-sugs button:hover{background:#173430;color:#fff}
+  .luna-input-row{display:flex;gap:10px;align-items:flex-end}
+  .luna-input-row textarea{background:#173430;color:#fff;border-color:#2c4a44;min-height:44px}
+  .luna-input-row textarea::placeholder{color:#8aa89f}
+  .luna-input-row button{white-space:nowrap}
+  .luna-input-row button.sec{background:#2c4a44;color:#d3e2dc}
+  .luna-note{color:#9ab9b0;font-size:12px;margin:8px 0 0}
+  .luna-thinking{opacity:.75}
+  @media(prefers-reduced-motion:no-preference){.luna-thinking{animation:lunapulse 1.2s ease-in-out infinite}}
+  @keyframes lunapulse{50%{opacity:.4}}
+  .luna-panel :focus-visible{outline-color:#71d8bb}
+  @media(max-width:800px){.luna-bubble{max-width:94%}.luna-input-row{flex-wrap:wrap}}
   @media(max-width:1050px){.stat-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-strip>div:nth-child(3){border-left:0;border-top:1px solid var(--line)}.stat-strip>div:nth-child(4){border-top:1px solid var(--line)}}
   @media(max-width:880px){#layout{flex-direction:column}nav{width:100%;height:auto;position:static;overflow:visible;padding:12px 14px}nav h1{margin:0 5px 8px}nav .nav-links{display:flex;gap:4px;overflow-x:auto;scrollbar-width:thin;padding-bottom:5px}nav .nav-group{display:contents}nav .nav-title{display:none}nav a{white-space:nowrap;margin:0}main{padding:22px 15px}.g2,.g3,.g4{grid-template-columns:1fr}.desk{grid-template-columns:1fr}.desk .desk-action{justify-self:start}}
-  @media(max-width:480px){.stat-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-strip>div{padding:13px}.stat-strip .big{font-size:20px}.desk{padding:19px}.desk h3{font-size:20px}#login{margin:22px 12px;padding:22px}table{font-size:13px}}
+  @media(max-width:480px){.stat-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-strip>div{padding:13px}.stat-strip .big{font-size:20px}.desk{padding:19px}.desk h3{font-size:20px}table{font-size:13px}}
+/* Cartera — resumen estilo Hapi */
+.pf-top{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:center;margin-top:6px}
+.pf-balance-num{font-size:clamp(28px,3.2vw,38px);letter-spacing:-.03em;line-height:1.1;font-variant-numeric:tabular-nums;margin:2px 0 6px}
+.pf-line{margin:2px 0}
+.pf-totals{margin:10px 0 0}
+.pf-donut-zone{display:flex;flex-direction:column;align-items:center;gap:10px;min-width:0}
+.donut{width:140px;height:140px;border-radius:50%;position:relative;flex:none}
+.donut::after{content:'';position:absolute;inset:19%;background:var(--card);border-radius:50%}
+.donut-legend{display:flex;flex-wrap:wrap;gap:5px 12px;justify-content:center;max-width:280px}
+.donut-chip{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;color:var(--mut);font-variant-numeric:tabular-nums}
+.donut-chip .dot{width:9px;height:9px;border-radius:50%;flex:none}
+.asset-row{border-bottom:1px solid var(--line)}
+.asset-row:last-child{border-bottom:0}
+.asset-row summary{display:flex;align-items:center;gap:10px;padding:11px 4px;list-style:none;cursor:pointer;margin:0;font-weight:400}
+.asset-row summary::-webkit-details-marker{display:none}
+.asset-row summary::after{content:'▾';color:var(--mut);font-size:12px}
+.asset-row[open]>summary::after{transform:rotate(180deg)}
+.asset-ic{width:34px;height:34px;border-radius:50%;background:#0e1f1c;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex:none}
+.asset-main{display:flex;flex-direction:column;min-width:0;line-height:1.35}
+.asset-val{display:flex;flex-direction:column;align-items:flex-end;margin-left:auto;text-align:right;font-variant-numeric:tabular-nums;line-height:1.35}
+.asset-detail{display:flex;flex-wrap:wrap;gap:14px 28px;padding:2px 4px 14px 48px;font-size:13.5px}
+.asset-flags{display:flex;align-items:center;gap:8px;flex-wrap:wrap;align-content:flex-start}
+@media(max-width:800px){.pf-top{grid-template-columns:1fr}.pf-donut-zone{margin-top:4px}}
+/* Mercado hoy y niveles por acción (regla técnica, no predicción) */
+.mkt-chips{display:flex;flex-wrap:wrap;gap:6px 8px;margin:6px 0 8px}
+.mkt-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:99px;padding:3px 10px;font-size:12.5px;font-variant-numeric:tabular-nums;background:var(--bg)}
+.mkt-chip.mut{color:var(--mut)}
+.lv-box{flex-basis:100%;border-top:1px dashed var(--line);padding-top:8px}
+.lv-box:empty{display:none}
+.lv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px 18px;margin:6px 0}
+.lv-grid>div:last-child:nth-child(n+4){grid-column:1/-1}
+@media(max-width:480px){.lv-grid{grid-template-columns:1fr}}

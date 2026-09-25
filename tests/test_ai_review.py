@@ -170,6 +170,84 @@ def test_missing_model_is_rejected(monkeypatch, method, payload):
         method(ENTRY if method is RV.challenge else REPORT)
 
 
+# ---------- opinión de Luna sobre una operación evaluada ----------
+
+OP = {"operacion": "comprar", "ticker": "NVDA", "monto_usd": 100,
+      "precio": {"valor": 1019.36, "fuente": "prueba", "asof": "2026-02-25"},
+      "acciones_aprox": 0.098, "efectivo_antes": 500.0, "efectivo_despues": 400.0,
+      "deposito_necesario": 0, "peso_antes_pct": 0, "peso_despues_pct": 12.5,
+      "total_antes": 1519.36, "total_despues": 1519.36,
+      "limites": [{"limite": "Máximo por empresa", "valor": 12.5, "maximo": 25, "cumple": True}],
+      "motor": {"propuesta": "comprar", "confianza": "media",
+                "argumentos": ["Dentro de límites"]},
+      "fundamentales": {"revenue": 215_938_000_000, "peso": 55.74},
+      "fecha": "2026-02-25T10:00:00"}
+
+OPINION = {"resumen": "La operación encaja con tus límites y el motor la respalda.",
+           "a_favor": ["El peso queda en 12.5%"], "en_contra": ["Reduce el efectivo disponible"],
+           "vigilar": ["¿La tesis sigue vigente?"]}
+
+
+def test_ungrounded_numbers_allowed_forms():
+    data = {"revenue": 215_938_000_000, "valor": 1019.36,
+            "fecha": "2026-02-25", "peso": 55.74}
+    ok = ["Subió un 55.7%", "Crece 56%", "Cerca de 215.9 mil millones",
+          "Vale 1,019.36 y también 1.019,36", "Sigue al S&P 500 y al Nasdaq 100",
+          "Presentado en 2026", "Son 3 puntos"]
+    for text in ok:
+        assert RV.ungrounded_numbers(text, data) == [], text
+    assert RV.ungrounded_numbers("12,5 es el peso", {"peso": 12.5}) == []
+    assert RV.ungrounded_numbers("Un 5% extra", data) == ["5"]
+    assert RV.ungrounded_numbers("Cuesta $7 la comisión", data) == ["7"]
+
+
+def test_trade_opinion_valid(monkeypatch):
+    calls = []
+
+    def fake(instructions, user_text, **kwargs):
+        calls.append((instructions, kwargs))
+        return dict(OPINION), "luna-prueba"
+
+    monkeypatch.setattr(RV.AP, "request", fake)
+    out = RV.trade_opinion(OP)
+    assert out == {**OPINION, "model": "luna-prueba"}
+    assert len(calls) == 1 and calls[0][1]["json_reply"] is True
+
+
+def test_trade_opinion_retries_once_on_ungrounded(monkeypatch):
+    replies = iter([{**OPINION, "resumen": "El margen es de 45%."}, dict(OPINION)])
+    calls = []
+
+    def fake(instructions, user_text, **kwargs):
+        calls.append(instructions)
+        return next(replies), "luna-prueba"
+
+    monkeypatch.setattr(RV.AP, "request", fake)
+    out = RV.trade_opinion(OP)
+    assert out["model"] == "luna-prueba" and len(calls) == 2
+    assert "Tu respuesta anterior incluyó cifras" in calls[1]
+
+
+def test_trade_opinion_two_ungrounded_replies_fail(monkeypatch):
+    bad = dict(OPINION, resumen="El margen es de 45%.")
+    monkeypatch.setattr(RV.AP, "request", lambda *a, **k: (dict(bad), "luna"))
+    with pytest.raises(RV.ReviewError, match="cifras que no están en tus datos"):
+        RV.trade_opinion(OP)
+
+
+@pytest.mark.parametrize("payload", [
+    None, "texto", {},
+    dict(OPINION, extra=1),                                   # clave de más
+    dict(OPINION, vigilar=["Revisa el precio"]),              # pregunta sin ¿…?
+    dict(OPINION, a_favor=[]),                                # lista vacía
+    {k: v for k, v in OPINION.items() if k != "en_contra"},   # clave faltante
+])
+def test_trade_opinion_rejects_invalid_structure(monkeypatch, payload):
+    monkeypatch.setattr(RV.AP, "request", lambda *a, **k: (payload, "luna"))
+    with pytest.raises(RV.ReviewError):
+        RV.trade_opinion(OP)
+
+
 @pytest.mark.parametrize("method", [RV.challenge, RV.explain])
 def test_unexpected_provider_reply_is_review_error(monkeypatch, method):
     monkeypatch.setattr(RV.AP, "request", lambda *a, **k: None)

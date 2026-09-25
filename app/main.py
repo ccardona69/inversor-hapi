@@ -14,13 +14,13 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
 from . import db as D
-from .routes import ai, auth, decisions, market, portfolio, system, trades
+from .routes import ai, decisions, market, portfolio, profile, radar, system, trades
 
 app = FastAPI(title="Inversor Hapi IA", version="0.1.0")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
 D.init_db()
 
-for module in (auth, portfolio, market, trades, ai, decisions, system):
+for module in (profile, portfolio, market, trades, ai, decisions, radar, system):
     app.include_router(module.router)
 
 

@@ -18,6 +18,11 @@ FUND_FIELDS = [
     ("business_model", "Modelo de negocio (texto)"), ("customer_concentration", "Dependencia de clientes (texto)"),
 ]
 
+# Campos de FUND_FIELDS que no son cifras: la SEC no los provee y los informes
+# los registran como texto o fecha; se usan para el resumen de faltantes.
+TEXT_FUND_FIELDS = {"moat", "key_risks", "business_model", "customer_concentration",
+                    "next_earnings_date"}
+
 
 def _num(d, key):
     v = d.get(key)

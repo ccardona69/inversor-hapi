@@ -161,7 +161,8 @@ def image_input(image_b64, mime):
 
 
 def request(instructions, user_text, *, image_b64=None, mime=None, env=None, client=None,
-            max_tokens=2048, json_reply=False, temperature=None, validate_image=True):
+            max_tokens=2048, json_reply=False, temperature=None, validate_image=True,
+            history=None):
     cfg = load_config(env)
     if not all(cfg[k] for k in ("api_key", "base_url", "model")):
         raise AIProviderError("IA no configurada: revisa INVERSOR_AI_API_KEY, "
@@ -175,16 +176,19 @@ def request(instructions, user_text, *, image_b64=None, mime=None, env=None, cli
         image_url = f"data:{mime};base64,{image_b64}"
     if json_reply:
         instructions += "\nResponde solo con un objeto JSON válido, sin markdown ni comentarios."
+    prior = [{"role": h["role"], "content": h["content"]} for h in (history or [])]
     if style == "responses":
         content = [{"type": "input_text", "text": user_text}]
         if image_url:
             content.append({"type": "input_image", "image_url": image_url, "detail": "auto"})
         body = {"model": cfg["model"], "instructions": instructions,
-                "input": [{"role": "user", "content": content}], "max_output_tokens": max_tokens}
+                "input": [*prior, {"role": "user", "content": content}],
+                "max_output_tokens": max_tokens}
     else:
         content = user_text if not image_url else [{"type": "text", "text": user_text},
                                                    {"type": "image_url", "image_url": {"url": image_url}}]
         body = {"model": cfg["model"], "messages": [{"role": "system", "content": instructions},
+                                                    *prior,
                                                     {"role": "user", "content": content}],
                 "max_tokens": max_tokens}
     if temperature is not None:

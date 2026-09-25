@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import analysis as AN
+from app import db as D
 from app import risk as RK
 from app import decisions as DE
 from app import marketdata as MD
@@ -93,33 +94,25 @@ def test_decision_engine_never_uses_avg_cost_as_reason():
     assert "costo promedio" not in joined.lower() or "no" in joined.lower()
 
 
-def test_simulator():
-    positions = [{"ticker": "NVDA", "market_value": 313.49, "invested": 335.37, "sector": "tec"},
-                 {"ticker": "MSFT", "market_value": 107.19, "invested": 118.44, "sector": "tec"}]
-    r = DE.simulate(positions, 100.0, {"NVDA": -30}, [])
-    assert r["valor_final_estimado"] == round(313.49 * 0.7 + 107.19 + 100, 2)
-    assert any("NVDA" in s for s in r["supuestos"])
-    # compra limitada al efectivo disponible
-    r2 = DE.simulate(positions, 50.0, {}, [{"ticker": "VTI", "side": "comprar", "amount_usd": 500}])
-    assert r2["efectivo_final"] == 0 and any("recortada" in s for s in r2["supuestos"])
-    # vender un ticker que no se tiene no debe crashear (antes: KeyError)
-    r3 = DE.simulate(positions, 100.0, {}, [{"ticker": "TSLA", "side": "vender", "amount_usd": 100}])
-    assert r3["valor_final_estimado"] == round(313.49 + 107.19 + 100, 2)
-    assert any("TSLA" in s and "ignorada" in s for s in r3["supuestos"])
-
-
 # ---------- API ----------
 
 @pytest.fixture(scope="module")
 def session():
-    r = client.post("/api/register", json={"email": "inv@test.pe", "password": "clave-segura-1"})
-    assert r.status_code == 200
     return client
 
 
-def test_portfolio_seed_and_validation(session):
+def test_portfolio_positions_and_validation(session):
     c = session
-    assert c.post("/api/seed_hapi").status_code == 200
+    src = "Hapi — captura de prueba (pendiente de verificación)"
+    for p in [
+        {"ticker": "NVDA", "name": "NVIDIA", "qty": 1.54575, "invested": 335.37,
+         "avg_cost": 216.96, "hapi_value": 313.49, "hapi_pl": -21.88,
+         "hapi_return_pct": -6.52, "source": src},
+        {"ticker": "MSFT", "name": "Microsoft", "qty": 0.27219, "invested": 118.44,
+         "avg_cost": 435.14, "hapi_value": 107.19, "hapi_pl": -11.25,
+         "hapi_return_pct": -9.50, "source": src},
+    ]:
+        assert c.post("/api/positions", json=p).status_code == 200
     pf = c.get("/api/portfolio").json()
     assert {p["ticker"] for p in pf["positions"]} == {"NVDA", "MSFT"}
     assert abs(pf["totals"]["invertido"] - 453.81) < 0.01
@@ -165,10 +158,10 @@ def test_analysis_requires_price(session):
 
 def test_journal_requires_thesis_for_trades(session):
     c = session
-    r = c.post("/api/journal", json={"ticker": "NVDA", "action": "comprar", "motivo": "", "tesis": ""})
+    r = c.post("/api/journal", json={"ticker": "NVDA", "action": "comprar", "tesis": ""})
     assert r.status_code == 400  # sin tesis/riesgos/invalidación no se registra una operación
     r = c.post("/api/journal", json={
-        "ticker": "NVDA", "action": "revision", "motivo": "Revisión trimestral",
+        "ticker": "NVDA", "action": "revision",
         "tesis": "Liderazgo en aceleradores (prueba)", "riesgos": "ciclo, competencia",
         "condicion_invalidacion": "pérdida de cuota sostenida", "review_date": "2020-01-01"})
     assert r.status_code == 200
@@ -208,14 +201,13 @@ def test_candidates_ranking(session):
     assert ranked[0]["ticker"] == "VTI"  # mejor riesgo/retorno según los datos del usuario
 
 
-def test_dashboard_and_simulate_api(session):
+def test_dashboard_api(session):
     d = session.get("/api/dashboard").json()
     assert d["risk"]["nivel_concentracion"] == "alta"
     assert d["calidad_datos"]
-    s = session.post("/api/simulate", json={"changes": {"NVDA": -20, "MSFT": -20}}).json()
-    assert s["valor_final_estimado"] > 0 and s["supuestos"]
 
 
+@pytest.mark.red
 def test_yahoo_fetch_tolerant():
     """Prueba de integración tolerante: si no hay red, debe fallar con mensaje claro."""
     try:
@@ -223,25 +215,6 @@ def test_yahoo_fetch_tolerant():
         assert q["price"] > 0 and q["source"].startswith("Yahoo") and q["asof"]
     except MD.MarketDataError as e:
         assert "manual" in str(e)
-
-
-def test_import_csv_positions(session):
-    c = session
-    rows = [
-        {"ticker": "AAPL", "qty": 2, "avg_cost": 150.0},   # válida
-        {"ticker": "", "qty": 5},                           # omitida: sin ticker
-        {"ticker": "GOOGL", "qty": 0},                      # omitida: cantidad 0
-    ]
-    r = c.post("/api/positions/import", json={"rows": rows})
-    assert r.status_code == 200
-    d = r.json()
-    assert "AAPL" in d["importadas"] and len(d["omitidas"]) == 2
-    pf = c.get("/api/portfolio").json()
-    aapl = next(p for p in pf["positions"] if p["ticker"] == "AAPL")
-    assert aapl["source"].startswith("Hapi") and not aapl["verified"]
-    assert abs(aapl["invested"] - 300.0) < 0.01  # 2 × 150, derivado por position_upsert
-    # sin filas: error claro
-    assert c.post("/api/positions/import", json={"rows": []}).status_code == 400
 
 
 # ---------- sincronización por foto (IA de visión) ----------
@@ -334,3 +307,71 @@ def test_delete_all(session):
     r = session.post("/api/settings/delete_all", json={"confirm": "ELIMINAR"})
     assert r.status_code == 200
     assert session.get("/api/portfolio").json()["positions"] == []
+
+
+# ---------- pruebas con BD aislada (cartera en un paso, cambio del día) ----------
+
+@pytest.fixture
+def isolated(tmp_path, monkeypatch):
+    monkeypatch.setattr(D, "DB_PATH", str(tmp_path / "isolated.db"))
+    D.init_db()
+    return TestClient(app)
+
+
+def _price(ticker, price, day_change_pct=None):
+    conn = D.get_db()
+    conn.execute("INSERT INTO prices (ticker, price, currency, asof, source, day_change_pct, created_at) "
+                 "VALUES (?,?,?,?,?,?,?)",
+                 (ticker, price, "USD", datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                  "prueba", day_change_pct, D.now()))
+    conn.commit()
+    conn.close()
+
+
+def test_portfolio_cambio_dia(isolated):
+    c = isolated
+    c.post("/api/positions", json={"ticker": "AAA", "qty": 2, "invested": 180})
+    c.post("/api/positions", json={"ticker": "BBB", "qty": 1, "invested": 90})
+    _price("AAA", 110.0, 10.0)
+    _price("BBB", 100.0, None)  # una posición sin cambio diario: no calculable
+    t = c.get("/api/portfolio").json()["totals"]
+    assert t["valor_actual"] == 320 and t["cambio_dia"] is None and t["cambio_dia_pct"] is None
+    _price("BBB", 100.0, 5.0)
+    t = c.get("/api/portfolio").json()["totals"]
+    prev = 220 / 1.10 + 100 / 1.05
+    assert abs(t["cambio_dia"] - round(320 - prev, 2)) < 0.01
+    assert abs(t["cambio_dia_pct"] - round((320 / prev - 1) * 100, 2)) < 0.01
+
+
+def test_photo_save_confirmed_and_replace_all(isolated):
+    c = isolated
+    c.post("/api/positions", json={"ticker": "OLD", "qty": 1, "invested": 50})
+    rows = [{"ticker": "NEW", "qty": 2, "avg_cost": 60.0}, {"ticker": "", "qty": 2}]
+    # reemplazar sin confirmar la revisión: 400 y nada cambia
+    r = c.post("/api/hapi/photo/save", json={"rows": rows, "replace_all": True})
+    assert r.status_code == 400
+    assert {p["ticker"] for p in c.get("/api/portfolio").json()["positions"]} == {"OLD"}
+    # reemplazar sin filas válidas: 400 y nada se borra
+    r = c.post("/api/hapi/photo/save", json={"rows": [{"ticker": "", "qty": 2}],
+                                           "confirmed": True, "replace_all": True})
+    assert r.status_code == 400
+    assert {p["ticker"] for p in c.get("/api/portfolio").json()["positions"]} == {"OLD"}
+    # confirmado + reemplazo: NEW queda verificada y OLD se reporta eliminada
+    r = c.post("/api/hapi/photo/save", json={"rows": rows, "confirmed": True,
+                                             "replace_all": True, "cash": 10})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["importadas"] == ["NEW"] and d["eliminadas"] == ["OLD"] and d["cash"] == 10
+    positions = c.get("/api/portfolio").json()["positions"]
+    assert {p["ticker"] for p in positions} == {"NEW"}
+    assert positions[0]["verified"]
+
+
+def test_verify_all_positions(isolated):
+    c = isolated
+    c.post("/api/positions", json={"ticker": "AAA", "qty": 1, "invested": 10})
+    c.post("/api/positions", json={"ticker": "BBB", "qty": 1, "invested": 10})
+    r = c.post("/api/positions/verify_all")
+    assert r.status_code == 200 and r.json()["confirmadas"] == 2
+    assert all(p["verified"] for p in c.get("/api/portfolio").json()["positions"])
+    assert c.post("/api/positions/verify_all").json()["confirmadas"] == 0

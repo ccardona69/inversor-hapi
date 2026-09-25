@@ -1,9 +1,9 @@
-"""Módulos 4-15: análisis y decisión, riesgo, simulador, oportunidades, alertas,
+"""Módulos 4-15: análisis y decisión, riesgo, oportunidades, alertas,
 diario de inversión y panel. El motor de decisión es determinista; la IA solo
 explica o cuestiona, nunca propone por su cuenta."""
 import json
 import math
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -13,8 +13,12 @@ from .. import analysis as AN
 from .. import db as D
 from .. import decisions as DE
 from .. import marketdata as MD
+from .. import marketpulse as MP
 from .. import risk as RK
+from .. import secdata as SEC
+from .. import tradesync as TS
 from ..deps import DISCLAIMER, conn_dep, current_user
+from .market import _sec_fundamentals, store_quote
 from .portfolio import cash_unsupported, enrich_positions, portfolio, without_current_value
 
 router = APIRouter()
@@ -23,20 +27,18 @@ router = APIRouter()
 class JournalIn(BaseModel):
     ticker: str = ""
     action: str = "revision"
-    motivo: str = ""
     tesis: str = ""
-    precio: Optional[float] = None
-    valoracion: str = ""
-    horizonte: str = ""
-    catalizadores: str = ""
     riesgos: str = ""
-    condiciones_salida: str = ""
     condicion_invalidacion: str = ""
-    perdida_tolerable: str = ""
-    tamano_posicion: str = ""
-    estado_emocional: str = ""
-    fuentes: str = ""
+    precio: Optional[float] = None
     review_date: str = ""
+
+
+class TradeCheckIn(BaseModel):
+    ticker: str
+    side: Literal["comprar", "vender"]
+    amount_usd: float
+    assumptions: Optional[dict] = None
 
 
 class CandidateIn(BaseModel):
@@ -81,7 +83,7 @@ def analyze(ticker: str, body: dict, uid: int = Depends(current_user), conn=Depe
     technical = None
     try:
         hist = MD.fetch_history(tk)
-        technical = MD.technical_summary(hist["rows"])
+        technical = MD.technical_summary(hist["rows"], price, price_row.get("day_change_pct"))
         technical["fuente"] = hist["source"]
         technical["obtenido"] = hist["fetched_at"]
     except MD.MarketDataError as e:
@@ -135,7 +137,6 @@ def analyze(ticker: str, body: dict, uid: int = Depends(current_user), conn=Depe
                                              "precio_asof": price_row["asof"],
                                              "fecha_analisis": report["fecha_hora"]}, ensure_ascii=False), D.now()))
     report["decision_id"] = cur.lastrowid
-    D.audit(conn, uid, "analisis_generado", f"{tk} -> {decision['decision_propuesta']}")
     return report
 
 
@@ -147,7 +148,6 @@ def record_decision(did: int, body: dict, uid: int = Depends(current_user), conn
         raise HTTPException(404, "Decisión no encontrada")
     conn.execute("UPDATE decisions SET user_choice=?, authorized=? WHERE id=?",
                  (body.get("choice"), int(bool(body.get("authorized"))), did))
-    D.audit(conn, uid, "decision_registrada", f"#{did} {body.get('choice')}")
     return {"ok": True, "detail": "Decisión registrada. La ejecución la realizas tú en tu bróker; "
                                   "ninguna autorización se reutiliza para operaciones futuras."}
 
@@ -187,6 +187,156 @@ def decision_explain(did: int, uid: int = Depends(current_user), conn=Depends(co
         raise HTTPException(502, str(exc)) from exc
 
 
+# ---------- ¿Compro o vendo? (evaluación de una operación concreta) ----------
+
+def _mercado_hoy():
+    """Pulso de mercado resumido; si la red falla, None (nunca rompe la evaluación)."""
+    try:
+        return MP.resumen_pulse(MP.cached_pulse())
+    except Exception:
+        return None
+
+
+@router.post("/api/trade_check")
+def trade_check(body: TradeCheckIn, uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    """Evalúa una operación concreta: precio vivo, pesos antes/después, límites,
+    motor determinista y fundamentales. Nunca ejecuta ni autoriza la operación."""
+    tk = body.ticker.strip().upper()
+    if not TS.TICKER.fullmatch(tk):
+        raise HTTPException(400, "Ticker inválido")
+    if not math.isfinite(body.amount_usd) or body.amount_usd <= 0:
+        raise HTTPException(400, "El monto debe ser un número positivo y finito")
+    amount = body.amount_usd
+
+    # Precio vivo del ticker y de todas las posiciones (cada cotización queda guardada).
+    for t in sorted({p["ticker"] for p in enrich_positions(conn, uid)} | {tk}):
+        try:
+            store_quote(conn, {**MD.fetch_quote(t), "ticker": t})
+        except MD.MarketDataError as e:
+            if t == tk:
+                raise HTTPException(400, f"No se pudo obtener el precio de {tk}: {e}. "
+                                         "Ingresa un precio manual en Cartera › Herramientas avanzadas.") from e
+
+    positions = enrich_positions(conn, uid)
+    pos = next((p for p in positions if p["ticker"] == tk), None)
+    pos_value = (pos["market_value"] or 0) if pos else 0.0
+    if body.side == "vender":
+        if pos is None or pos_value <= 0:
+            raise HTTPException(400, f"No tienes {tk} en tu cartera.")
+        if amount > pos_value + 0.01:
+            raise HTTPException(400, f"Solo tienes $ {pos_value:.2f} en {tk}.")
+
+    # Fundamentales: solo si faltan; nunca reemplaza los existentes.
+    fundamentales_nota = None
+    if not conn.execute("SELECT 1 FROM fundamentals WHERE user_id=? AND ticker=?",
+                        (uid, tk)).fetchone():
+        try:
+            _sec_fundamentals(tk, conn, uid)
+        except SEC.SecDataError as e:
+            fundamentales_nota = e.detail
+
+    report = analyze(tk, {"assumptions": body.assumptions or {}}, uid, conn)
+    price = report["precio_actual"]["valor"]
+    cash_row = conn.execute("SELECT amount FROM cash WHERE user_id=?", (uid,)).fetchone()
+    efectivo_antes = cash_row["amount"] if cash_row else 0.0
+    total_antes = sum(p["market_value"] or 0 for p in positions) + efectivo_antes
+    acciones = round(amount / price, 6)
+    if body.side == "comprar":
+        deposito = round(max(0.0, amount - efectivo_antes), 2)
+        efectivo_despues = efectivo_antes + deposito - amount  # efectivo tras depositar lo justo
+        valor_despues = pos_value + amount
+        total_despues = total_antes + deposito
+        efectivo_suficiente = deposito == 0
+    else:
+        efectivo_despues = efectivo_antes + amount
+        deposito = 0.0
+        valor_despues = pos_value - amount
+        total_despues = total_antes
+        efectivo_suficiente = True
+    peso_antes = round(pos_value / total_antes * 100, 2) if total_antes else None
+    peso_despues = round(valor_despues / total_despues * 100, 2) if total_despues else None
+
+    limits = {**RK.DEFAULT_LIMITS, **(D.get_setting(conn, uid, "limits", {}) or {})}
+    sector = (pos or {}).get("sector") or RK.KNOWN_SECTORS.get(tk, "sin clasificar")
+    sector_value = valor_despues + sum(
+        p["market_value"] or 0 for p in positions if p["ticker"] != tk
+        and (p.get("sector") or RK.KNOWN_SECTORS.get(p["ticker"], "sin clasificar")) == sector)
+    sector_pct = round(sector_value / total_despues * 100, 2) if total_despues else None
+    lim_checks = [
+        {"limite": "Máximo por empresa", "valor": peso_despues, "maximo": limits["max_position_pct"],
+         "cumple": peso_despues is not None and peso_despues <= limits["max_position_pct"]},
+        {"limite": "Máximo por operación", "valor": round(amount / total_antes * 100, 2) if total_antes else None,
+         "maximo": limits["max_trade_pct"],
+         "cumple": bool(total_antes) and amount / total_antes * 100 <= limits["max_trade_pct"]},
+        {"limite": "Reserva mínima de efectivo", "valor": round(efectivo_despues, 2),
+         "maximo": limits["min_cash_reserve"], "cumple": efectivo_despues >= limits["min_cash_reserve"]},
+        {"limite": "Máximo por sector", "valor": sector_pct, "maximo": limits["max_sector_pct"],
+         "cumple": sector_pct is not None and sector_pct <= limits["max_sector_pct"]},
+    ]
+    cumple_limites = all(c["cumple"] for c in lim_checks)
+
+    scen = report["valoracion"]
+    tec = report["situacion_tecnica"] or {}
+    fund_row = conn.execute("SELECT data, source, asof FROM fundamentals WHERE user_id=? AND ticker=?",
+                            (uid, tk)).fetchone()
+    fund_data = json.loads(fund_row["data"]) if fund_row else None
+    numeric_keys = [k for k, _ in AN.FUND_FIELDS if k not in AN.TEXT_FUND_FIELDS]
+    prof = D.get_setting(conn, uid, "risk_profile", {}) or {}
+    operacion = {
+        "operacion": body.side, "ticker": tk, "monto_usd": amount,
+        "precio": {"valor": price, "fuente": report["precio_actual"]["fuente"],
+                   "asof": report["precio_actual"]["asof"]},
+        "acciones_aprox": acciones,
+        "efectivo_antes": round(efectivo_antes, 2), "efectivo_despues": round(efectivo_despues, 2),
+        "deposito_necesario": deposito,
+        "peso_antes_pct": peso_antes, "peso_despues_pct": peso_despues,
+        "total_antes": round(total_antes, 2), "total_despues": round(total_despues, 2),
+        "limites": lim_checks, "cumple_limites": cumple_limites,
+        "motor": {"propuesta": report["decision"]["decision_propuesta"],
+                  "confianza": report["decision"]["nivel_confianza"],
+                  "argumentos": report["decision"]["argumentos"]},
+        "valoracion": {"calculable": scen["calculable"],
+                       "valor_base_por_accion": (scen["escenarios"]["base"].get("valor_estimado_por_accion")
+                                                 if scen["calculable"] else None),
+                       "margen_seguridad_base_pct": (scen["escenarios"]["base"].get("margen_de_seguridad_pct")
+                                                    if scen["calculable"] else None)},
+        "multiplos": report["multiplos"]["multiples"],
+        "fundamentales": ({k: fund_data[k] for k in numeric_keys if k in fund_data}
+                          | {"fuente": fund_row["source"], "asof": fund_row["asof"]}) if fund_row else None,
+        "tecnica": ({k: tec[k] for k in ("tendencia", "rsi14", "distancia_a_maximo_pct",
+                                        "volatilidad_anualizada_pct") if k in tec}
+                    if tec and "error" not in tec else None),
+        "niveles": tec.get("niveles") if tec and "error" not in tec else None,
+        "mercado_hoy": _mercado_hoy(),
+        "perfil": {k: prof.get(k) for k in DE.RISK_PROFILE_FIELDS},
+        "fecha": D.now(),
+    }
+    row = conn.execute("SELECT proposal FROM decisions WHERE id=? AND user_id=?",
+                       (report["decision_id"], uid)).fetchone()
+    proposal = json.loads(row["proposal"])
+    proposal["operacion_evaluada"] = operacion
+    conn.execute("UPDATE decisions SET proposal=? WHERE id=?",
+                 (json.dumps(proposal, ensure_ascii=False), report["decision_id"]))
+    return {**operacion, "analisis": report, "decision_id": report["decision_id"],
+            "fundamentales_nota": fundamentales_nota, "efectivo_suficiente": efectivo_suficiente,
+            "nota": "Cálculo sin comisiones de Hapi ni variación del precio de ejecución."}
+
+
+@router.post("/api/trade_check/{did}/luna")
+def trade_check_luna(did: int, uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    """Segunda opinión de Luna sobre la operación ya evaluada (no cambia nada)."""
+    row = conn.execute("SELECT proposal FROM decisions WHERE id=? AND user_id=?", (did, uid)).fetchone()
+    if not row:
+        raise HTTPException(404, "Decisión no encontrada")
+    op = json.loads(row["proposal"]).get("operacion_evaluada")
+    if not op:
+        raise HTTPException(400, "Evalúa la operación antes de pedir la opinión de Luna.")
+    try:
+        return RV.trade_opinion(op)
+    except RV.ReviewError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
 # ---------- Módulo 8: riesgo ----------
 
 @router.get("/api/risk")
@@ -208,23 +358,7 @@ def risk_get(uid: int = Depends(current_user), conn=Depends(conn_dep)):
 def limits_put(body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep)):
     limits = {**(D.get_setting(conn, uid, "limits", {}) or {}), **body}
     D.set_setting(conn, uid, "limits", limits)
-    D.audit(conn, uid, "limites_actualizados", json.dumps(body)[:200])
     return {"ok": True, "limits": {**RK.DEFAULT_LIMITS, **limits}}
-
-
-# ---------- Módulo 9: simulador ----------
-
-@router.post("/api/simulate")
-def simulate(body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep)):
-    positions = enrich_positions(conn, uid)
-    missing_value = without_current_value(positions)
-    if missing_value:
-        raise HTTPException(400, "Simulación no calculable: actualiza valores en USD de " + ", ".join(missing_value))
-    cash_row = conn.execute("SELECT amount, currency FROM cash WHERE user_id=?", (uid,)).fetchone()
-    if cash_unsupported(cash_row):
-        raise HTTPException(400, "Simulación no calculable: el efectivo no está en USD")
-    return DE.simulate(positions, cash_row["amount"] if cash_row else 0,
-                       body.get("changes") or {}, body.get("trades") or [])
 
 
 # ---------- Módulo 10: oportunidades ----------
@@ -251,7 +385,6 @@ def candidate_add(body: CandidateIn, uid: int = Depends(current_user), conn=Depe
         raise HTTPException(400, "Indica la fuente de tus datos del candidato")
     conn.execute("INSERT INTO candidates (user_id, ticker, name, data, source, created_at) VALUES (?,?,?,?,?,?)",
                  (uid, body.ticker.upper(), body.name, json.dumps(body.data, ensure_ascii=False), body.source, D.now()))
-    D.audit(conn, uid, "candidato_agregado", body.ticker)
     return {"ok": True}
 
 
@@ -318,7 +451,7 @@ def journal_list(uid: int = Depends(current_user), conn=Depends(conn_dep)):
 
 @router.post("/api/journal")
 def journal_add(body: JournalIn, uid: int = Depends(current_user), conn=Depends(conn_dep)):
-    required = {"motivo": body.motivo, "tesis": body.tesis, "riesgos": body.riesgos,
+    required = {"tesis": body.tesis, "riesgos": body.riesgos,
                 "condicion_invalidacion": body.condicion_invalidacion}
     missing = [k for k, v in required.items() if not v.strip()]
     if body.action in ("comprar", "vender", "agregar", "reducir") and missing:
@@ -327,7 +460,6 @@ def journal_add(body: JournalIn, uid: int = Depends(current_user), conn=Depends(
     cur = conn.execute("INSERT INTO journal (user_id, ticker, action, data, review_date, created_at) VALUES (?,?,?,?,?,?)",
                        (uid, body.ticker.upper(), body.action, json.dumps(data, ensure_ascii=False),
                         body.review_date, D.now()))
-    D.audit(conn, uid, "diario_registrado", f"{body.ticker} {body.action}")
     return {"ok": True, "id": cur.lastrowid}
 
 
@@ -338,10 +470,9 @@ def journal_evaluate(jid: int, body: dict, uid: int = Depends(current_user), con
     if not row:
         raise HTTPException(404, "Entrada no encontrada")
     evaluation = {k: body.get(k) for k in
-                  ("que_ocurrio", "tesis_correcta", "tamano_adecuado", "hubo_fomo", "compro_tras_subida",
-                   "promedio_sin_justificacion", "vendio_por_miedo", "ignoro_valoracion", "suerte_o_proceso", "leccion")}
+                  ("que_ocurrio", "tesis_correcta", "suerte_o_proceso", "hubo_fomo",
+                   "vendio_por_miedo", "leccion")}
     conn.execute("UPDATE journal SET evaluation=? WHERE id=?", (json.dumps(evaluation, ensure_ascii=False), jid))
-    D.audit(conn, uid, "diario_evaluado", f"#{jid}")
     return {"ok": True}
 
 

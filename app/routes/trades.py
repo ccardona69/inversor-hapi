@@ -84,7 +84,6 @@ def trades_import(body: dict, uid: int = Depends(current_user), conn=Depends(con
             conn.execute("INSERT INTO trade_sources (trade_id, user_id, source, model, order_id, fingerprint, imported_at) "
                          "VALUES (?,?,?,?,?,?,?)",
                          (cur.lastrowid, uid, confirmed_source, model, trade.get("order_id"), fingerprint, D.now()))
-        D.audit(conn, uid, "operaciones_importadas", f"{len(ids)} filas; fuente: {confirmed_source}; duplicados: {len(duplicates)}")
     except Exception:
         conn.rollback()
         raise
@@ -168,7 +167,6 @@ def trades_reconcile(ticker: str, body: dict, uid: int = Depends(current_user), 
         conn.execute("UPDATE positions SET avg_cost=?, invested=?, verified=0, updated_at=? "
                      "WHERE user_id=? AND ticker=?",
                      (float(basis["avg_cost"]), float(basis["invested"]), D.now(), uid, tk))
-        D.audit(conn, uid, "costo_reconciliado", f"{tk} qty={basis['qty']} operaciones={len(trades)}")
     return {"qty": str(basis["qty"]), "invested": str(basis["invested"]),
             "avg_cost": str(basis["avg_cost"]), "position_qty": pos["qty"],
             "preview_token": snapshot if body.get("apply") is not True else None,

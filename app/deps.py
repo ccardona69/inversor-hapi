@@ -1,5 +1,5 @@
 """Dependencias, helpers y constantes compartidas por los routers de la API."""
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException
 
 from . import ai_provider as AP
 from . import db as D
@@ -17,11 +17,9 @@ def conn_dep():
         conn.close()
 
 
-def current_user(request: Request, conn=Depends(conn_dep)) -> int:
-    uid = D.session_user(conn, request.cookies.get("session"))
-    if uid is None:
-        raise HTTPException(401, "No autenticado")
-    return uid
+def current_user(conn=Depends(conn_dep)) -> int:
+    # App local de un solo usuario: sin login, todo opera sobre el usuario local.
+    return D.local_user_id(conn)
 
 
 def _photo_input(body):

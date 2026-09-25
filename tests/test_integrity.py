@@ -5,7 +5,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import db as D
-from app import decisions as DE
 from app import marketdata as MD
 from app import photosync as PS
 from app.main import app
@@ -15,24 +14,19 @@ from app.main import app
 def session(tmp_path, monkeypatch):
     monkeypatch.setattr(D, "DB_PATH", str(tmp_path / "integrity.db"))
     D.init_db()
-    client = TestClient(app)
-    assert client.post("/api/register", json={"email": "integridad@test.pe",
-                                               "password": "clave-segura-1"}).status_code == 200
-    return client
+    return TestClient(app)
 
 
-def test_local_home_serves_navigation_without_exposing_private_api(session):
-    anon = TestClient(app)
-    homepage = anon.get("/")
+def test_local_home_serves_navigation_and_static_assets(session):
+    homepage = session.get("/")
     assert homepage.status_code == 200
     assert homepage.headers["cache-control"] == "no-cache"
-    assert 'href="#analisis"' in homepage.text and 'href="#asistente"' in homepage.text
+    assert 'href="#analisis"' in homepage.text and 'href="#ajustes"' in homepage.text
     assert '<link rel="stylesheet" href="/app.css">' in homepage.text
-    styles = anon.get("/app.css")
+    styles = session.get("/app.css")
     assert styles.status_code == 200 and styles.headers["cache-control"] == "no-cache"
-    assert '#layout.hidden{display:none}' in styles.text
-    assert anon.get("/api/portfolio").status_code == 401
-    assert anon.get("/api/assistant/status").status_code == 401
+    assert session.get("/api/portfolio").status_code == 200
+    assert session.get("/api/assistant/status").status_code == 200
 
 
 def test_editing_a_verified_position_requires_verification_again(session):
@@ -136,7 +130,6 @@ def test_incomplete_portfolio_does_not_invent_totals_or_risk(session):
     assert portfolio["totals"]["sin_precio_vigente"] == ["BBB"]
     assert next(p for p in portfolio["positions"] if p["ticker"] == "BBB")["market_value"] == 120
     assert "error" in session.get("/api/risk").json()
-    assert session.post("/api/simulate", json={"changes": {"AAA": -10}}).status_code == 400
     blocked = session.post("/api/analysis/AAA", json={})
     assert blocked.status_code == 400 and "BBB" in blocked.json()["detail"]
     alerts = session.get("/api/alerts").json()["alerts"]
@@ -171,7 +164,6 @@ def test_currency_mismatch_blocks_valuation_risk_and_decisions(session):
     assert pf["totals"]["valor_actual"] is None
     assert "error" in session.get("/api/risk").json()
     assert session.post("/api/analysis/TEST", json={}).status_code == 400
-    assert session.post("/api/simulate", json={}).status_code == 400
 
 
 def test_foreign_cash_does_not_enter_usd_risk(session):
@@ -189,16 +181,10 @@ def test_foreign_cash_does_not_enter_usd_risk(session):
     pf = session.get("/api/portfolio").json()
     assert pf["cash"] is None and pf["cash_currency"] == "EUR"
     assert "error" in session.get("/api/risk").json()
-    assert session.post("/api/simulate", json={}).status_code == 400
     assert session.post("/api/analysis/TEST", json={}).status_code == 400
     assert any(a["type"] == "moneda_efectivo" for a in session.get("/api/alerts").json()["alerts"])
     assert session.put("/api/cash", json={"amount": 30, "currency": "USD"}).status_code == 200
     assert session.get("/api/portfolio").json()["cash"] == 30
-
-
-def test_simulation_does_not_invent_return_without_cost():
-    result = DE.simulate([{"ticker": "AAA", "market_value": 100, "invested": None}], 0, {}, [])
-    assert result["resultado_vs_invertido"] is None
 
 
 def test_photo_nonfinite_values_are_missing_not_portfolio_numbers():

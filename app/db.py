@@ -1,9 +1,7 @@
-"""Capa de datos de Inversor Hapi IA: esquema SQLite, sesiones y auditoría."""
+"""Capa de datos de Inversor Hapi IA: esquema SQLite y usuario único local."""
 import os
 import json
 import sqlite3
-import hashlib
-import secrets
 from datetime import datetime, timezone
 
 DB_PATH = os.environ.get("INVERSOR_DB", os.path.join(os.path.dirname(__file__), "..", "inversor.db"))
@@ -14,12 +12,11 @@ def now() -> str:
 
 
 SCHEMA = """
+-- App local de un solo usuario: la fila de users solo existe para que el resto
+-- de tablas puedan seguir filtrando por user_id.
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, pw_hash TEXT NOT NULL,
     salt TEXT NOT NULL, created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_at TEXT NOT NULL
 );
 -- Módulo 1: posiciones. Cada dato marca su origen y si está verificado.
 CREATE TABLE IF NOT EXISTS positions (
@@ -79,9 +76,6 @@ CREATE TABLE IF NOT EXISTS candidates (
 CREATE TABLE IF NOT EXISTS settings (
     user_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT, PRIMARY KEY (user_id, key)
 );
-CREATE TABLE IF NOT EXISTS audit_log (
-    id INTEGER PRIMARY KEY, user_id INTEGER, at TEXT NOT NULL, action TEXT NOT NULL, detail TEXT
-);
 """
 
 
@@ -105,44 +99,24 @@ def init_db():
     for column in ("period", "unit", "shares_unit"):
         if column not in columns:
             conn.execute(f"ALTER TABLE fundamentals ADD COLUMN {column} TEXT")
+    # Usuario local único al arrancar: así las solicitudes solo leen y no dejan
+    # transacciones abiertas (hay endpoints que ejecutan BEGIN IMMEDIATE).
+    conn.execute("INSERT INTO users (email, pw_hash, salt, created_at) "
+                 "SELECT 'local', '', '', ? WHERE NOT EXISTS (SELECT 1 FROM users WHERE email='local')", (now(),))
     conn.commit()
     conn.close()
 
 
-def audit(conn, user_id, action, detail=""):
-    conn.execute("INSERT INTO audit_log (user_id, at, action, detail) VALUES (?,?,?,?)",
-                 (user_id, now(), action, detail[:500]))
-
-
-def hash_password(password: str, salt: str) -> str:
-    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 200_000).hex()
-
-
-def create_user(conn, email, password):
-    salt = secrets.token_hex(16)
-    cur = conn.execute("INSERT INTO users (email, pw_hash, salt, created_at) VALUES (?,?,?,?)",
-                       (email.lower().strip(), hash_password(password, salt), salt, now()))
-    return cur.lastrowid
-
-
-def check_login(conn, email, password):
-    row = conn.execute("SELECT * FROM users WHERE email=?", (email.lower().strip(),)).fetchone()
-    if row and secrets.compare_digest(row["pw_hash"], hash_password(password, row["salt"])):
+def local_user_id(conn) -> int:
+    """Usuario único de la app (sin login): la cuenta 'local'. Las cuentas de la
+    época con registro quedan intactas pero no se usan: la primera solía ser de prueba."""
+    row = conn.execute("SELECT id FROM users WHERE email='local'").fetchone()
+    if row:
         return row["id"]
-    return None
-
-
-def create_session(conn, user_id):
-    token = secrets.token_hex(32)
-    conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?,?,?)", (token, user_id, now()))
-    return token
-
-
-def session_user(conn, token):
-    if not token:
-        return None
-    row = conn.execute("SELECT user_id FROM sessions WHERE token=?", (token,)).fetchone()
-    return row["user_id"] if row else None
+    cur = conn.execute("INSERT INTO users (email, pw_hash, salt, created_at) "
+                       "VALUES ('local', '', '', ?)", (now(),))
+    conn.commit()  # el INSERT no puede quedar pendiente: hay endpoints con BEGIN IMMEDIATE
+    return cur.lastrowid
 
 
 def get_setting(conn, user_id, key, default=None):
