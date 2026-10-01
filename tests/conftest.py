@@ -14,6 +14,7 @@ os.environ["INVERSOR_DB"] = os.path.join(tempfile.mkdtemp(), "test.db")
 
 from app import marketdata as MD  # noqa: E402  (tras fijar INVERSOR_DB)
 from app import marketpulse as MP  # noqa: E402
+from app.routes import marcador as MARC  # noqa: E402
 
 
 def pytest_configure(config):
@@ -32,8 +33,10 @@ def sin_red(request, monkeypatch):
     if request.node.get_closest_marker("red") is None:
         monkeypatch.setattr(MD, "_fetch_json", _sin_red)
     MP._clear_cache()
+    MARC._clear_cache()
     yield
     MP._clear_cache()
+    MARC._clear_cache()
 
 
 class FakeClient:

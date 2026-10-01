@@ -1,29 +1,69 @@
 <!DOCTYPE html>
+
 <html lang="es">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Inversor Hapi IA — Decisiones explicables</title>
-<link rel="stylesheet" href="/app.css">
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<meta content="#102c26" name="theme-color"/>
+<meta content="light dark" name="color-scheme"/>
+<meta content="Hapi IA: un espacio para entender tu cartera y tomar decisiones de inversión con criterio." name="description"/>
+<title>Hapi IA · Inversión con criterio</title>
+<link href="/app.css" rel="stylesheet"/>
 </head>
 <body>
-<div id="layout">
-<nav aria-label="Navegación principal">
-  <h1>Inversor <span>Hapi IA</span></h1>
-  <div class="nav-links">
-    <div class="nav-group"><div class="nav-title">Mi inversión</div>
-      <a href="#inicio">Hoy</a>
-      <a href="#cartera">Cartera</a>
-      <a href="#analisis">¿Compro o vendo?</a>
-      <a href="#diario">Diario</a>
-      <a href="#oportunidades">Oportunidades</a></div>
-    <div class="nav-group"><div class="nav-title">Configuración</div>
-      <a href="#ajustes">Ajustes</a></div>
-  </div>
+<a class="skip-link" href="#main-content">Saltar al contenido</a>
+<aside aria-label="Navegación principal" class="sidebar" id="sidebar">
+<a aria-label="Hapi IA, ir al resumen" class="brand" href="#resumen">
+<svg aria-hidden="true" class="brand-mark" fill="none" viewbox="0 0 36 36"><rect height="33" rx="8" stroke="currentColor" stroke-width="1.5" width="33" x="1.5" y="1.5"></rect><path d="M11 10v16M25 10v16M11 18h14" stroke="currentColor" stroke-linecap="round" stroke-width="2.5"></path></svg>
+<span class="brand-name">hapi</span><span class="brand-ai">IA</span>
+</a>
+<button aria-label="Cerrar menú" class="icon-btn sidebar-close" data-action="close-menu"><span data-icon="x"></span></button>
+<p class="nav-label">TU ESPACIO</p>
+<nav class="nav">
+<a class="nav-link" data-route="resumen" href="#resumen"><span data-icon="grid"></span>Resumen</a>
+<a class="nav-link" data-route="cartera" href="#cartera"><span data-icon="wallet"></span>Mi cartera</a>
+<a class="nav-link" data-route="analisis" href="#analisis"><span data-icon="sliders"></span>¿Compro o vendo?</a>
+<a class="nav-link" data-route="explorar" href="#explorar"><span data-icon="compass"></span>Explorar</a>
+<a class="nav-link" data-route="asistente" href="#asistente"><span data-icon="sparkles"></span>Hapi IA<span aria-hidden="true" class="nav-dot"></span></a>
+<a class="nav-link" data-route="movimientos" href="#movimientos"><span data-icon="activity"></span>Movimientos</a>
+<a class="nav-link" data-route="diario" href="#diario"><span data-icon="book"></span>Mi diario</a>
 </nav>
-<main id="view"></main>
+<div class="sidebar-bottom">
+<div class="sidebar-note">
+<span data-icon="book"></span>
+<strong>El criterio se construye.</strong>
+<p>Entiende primero. Decide después. Cada pregunta es un buen comienzo.</p>
 </div>
-
+<a class="side-action" data-route="ajustes" href="#ajustes"><span data-icon="settings"></span>Ajustes</a>
+<button class="side-action" data-action="theme" id="theme-button"><span data-icon="moon"></span><span id="theme-label">Tema oscuro</span></button>
+<button class="side-action" data-action="about"><span data-icon="help"></span>Sobre esta app</button>
+<div class="profile">
+<span aria-hidden="true" class="avatar">h.</span>
+<div><p class="profile-name">Mi espacio</p><p class="profile-meta">Inversionista personal</p></div>
+</div>
+</div>
+</aside>
+<button aria-label="Cerrar menú" class="mobile-backdrop" data-action="close-menu" tabindex="-1"></button>
+<div class="app">
+<header class="topbar">
+<div class="crumb">
+<button aria-controls="sidebar" aria-expanded="false" aria-label="Abrir menú" class="icon-btn mobile-menu" data-action="menu" id="menu-button"><span data-icon="menu"></span></button>
+<span class="muted crumb-parent">Mi espacio</span><span data-icon="chevron"></span><span id="crumb-current">Resumen</span>
+</div>
+<div class="topbar-actions">
+<button aria-label="Buscar un activo. Atajo Control o Comando K" class="top-search" data-action="search"><span data-icon="search"></span><span>Buscar un activo…</span><kbd aria-hidden="true">⌘ K</kbd></button>
+<button aria-label="Ver el alcance y el origen de los datos" class="top-demo" data-action="about"><span data-icon="info"></span><span class="demo-long" id="mode-label">Modo local</span><span class="demo-short" id="mode-label-short">Local</span></button>
+</div>
+</header>
+<main class="content" id="main-content" tabindex="-1"><noscript>Esta aplicación necesita JavaScript. Tus datos nunca se reemplazan por cifras inventadas: cada número lleva su fuente y su fecha.</noscript></main>
+</div>
+<dialog aria-labelledby="dialog-title" id="app-dialog">
+<div class="dialog-head"><h2 id="dialog-title"></h2><button aria-label="Cerrar ventana" class="icon-btn" data-action="close-dialog"><span data-icon="x"></span></button></div>
+<div class="dialog-body" id="dialog-body"></div>
+</dialog>
+<div aria-atomic="true" aria-live="polite" class="toast" id="toast" role="status">
+<span data-icon="check"></span><span class="toast-text" id="toast-text"></span><button aria-label="Cerrar aviso" class="icon-btn" data-action="close-toast"><span data-icon="x"></span></button>
+</div>
 <script src="/app.js"></script>
 </body>
 </html>

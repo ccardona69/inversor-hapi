@@ -58,9 +58,14 @@ def fetch_history(ticker: str, rng: str = "1y") -> dict:
         return col if len(col) == len(stamps) else [None] * len(stamps)
 
     highs, lows, volumes = _col("high"), _col("low"), _col("volume")
+    # adjclose (retorno total, con dividendos) vive en otra serie de indicators;
+    # si falta o no se alinea con los timestamps, queda None en vez de inventarse.
+    adj = (result["indicators"].get("adjclose") or [{}])[0].get("adjclose") or []
+    adjclose = adj if len(adj) == len(stamps) else [None] * len(stamps)
     rows = [
         {"date": datetime.fromtimestamp(t, tz=timezone.utc).date().isoformat(),
-         "close": c, "volume": volumes[i], "high": highs[i], "low": lows[i]}
+         "close": c, "volume": volumes[i], "high": highs[i], "low": lows[i],
+         "adjclose": adjclose[i]}
         for i, (t, c) in enumerate(zip(stamps, closes)) if c is not None
     ]
     return {"ticker": ticker.upper(), "source": "Yahoo Finance (chart API)",

@@ -109,7 +109,8 @@ def test_fetch_history_includes_high_low(monkeypatch):
     monkeypatch.setattr(MD, "_fetch_json", lambda url: payload)
     rows = MD.fetch_history("AAA")["rows"]
     assert len(rows) == 2                                  # el close None se descarta
-    assert rows[0] == {"date": rows[0]["date"], "close": 10.0, "volume": 1, "high": 11.0, "low": 9.0}
+    assert rows[0] == {"date": rows[0]["date"], "close": 10.0, "volume": 1, "high": 11.0,
+                       "low": 9.0, "adjclose": None}   # sin serie adjclose → None
     assert rows[1]["high"] == 13.0 and rows[1]["low"] == 11.0
     del payload["chart"]["result"][0]["indicators"]["quote"][0]["high"]
     assert MD.fetch_history("AAA")["rows"][0]["high"] is None

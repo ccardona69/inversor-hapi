@@ -76,6 +76,20 @@ CREATE TABLE IF NOT EXISTS candidates (
 CREATE TABLE IF NOT EXISTS settings (
     user_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT, PRIMARY KEY (user_id, key)
 );
+-- Fase 1 (marcador + alcancía): movimientos de dinero contados por el usuario.
+-- fx_rate guarda el tipo de cambio implícito soles/usd solo como dato; el costo
+-- del depósito siempre usa el tc de mercado del día, nunca el implícito.
+-- fingerprint no es única: sirve para detectar duplicados, no para bloquearlos.
+CREATE TABLE IF NOT EXISTS contributions (
+    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,            -- deposito | retiro | dividendo | ahorro_soles
+    amount_usd REAL, soles_amount REAL, fx_rate REAL,
+    at TEXT NOT NULL,              -- YYYY-MM-DD
+    source TEXT NOT NULL,          -- captura | texto | historial
+    fingerprint TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS contributions_user_fp ON contributions(user_id, fingerprint);
 """
 
 
@@ -92,6 +106,12 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+SCHEMA_VERSION = 1  # subir al cambiar el esquema; init_db aplica migraciones aquí
+
+USER_TABLES = ("positions", "trades", "trade_sources", "cash", "fundamentals",
+               "journal", "decisions", "candidates", "settings", "contributions")
+
+
 def init_db():
     conn = get_db()
     conn.executescript(SCHEMA)
@@ -103,8 +123,84 @@ def init_db():
     # transacciones abiertas (hay endpoints que ejecutan BEGIN IMMEDIATE).
     conn.execute("INSERT INTO users (email, pw_hash, salt, created_at) "
                  "SELECT 'local', '', '', ? WHERE NOT EXISTS (SELECT 1 FROM users WHERE email='local')", (now(),))
+    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     conn.commit()
     conn.close()
+
+
+def backup_dir():
+    return os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "backups")
+
+
+def backup_db(max_keep=10):
+    """Copia de seguridad íntegra vía VACUUM INTO a backups/, con rotación.
+
+    El ledger es lo único que no se puede reescribir: el código se rehace, la
+    historia de aportes no. Devuelve la ruta del snapshot, o None si no hay base."""
+    if not os.path.exists(DB_PATH):
+        return None
+    folder = backup_dir()
+    os.makedirs(folder, exist_ok=True)
+    dest = os.path.join(folder, "inversor-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".db")
+    # VACUUM INTO exige un archivo nuevo: dos backups en el mismo segundo difieren por sufijo.
+    n = 2
+    while os.path.exists(dest):
+        dest = dest[:-3] + f"-{n}.db"
+        n += 1
+    conn = get_db()
+    try:
+        conn.execute("VACUUM INTO ?", (dest,))
+    finally:
+        conn.close()
+    snapshots = sorted(f for f in os.listdir(folder)
+                       if f.startswith("inversor-") and f.endswith(".db"))
+    for stale in snapshots[:-max_keep]:
+        try:
+            os.remove(os.path.join(folder, stale))
+        except OSError:
+            pass
+    return dest
+
+
+def backup_due(max_age_hours=20):
+    """True si el snapshot más reciente es más viejo que max_age_hours (o no hay)."""
+    folder = backup_dir()
+    try:
+        snapshots = sorted(f for f in os.listdir(folder)
+                           if f.startswith("inversor-") and f.endswith(".db"))
+    except OSError:
+        return True
+    if not snapshots:
+        return True
+    newest = os.path.getmtime(os.path.join(folder, snapshots[-1]))
+    return (datetime.now().timestamp() - newest) > max_age_hours * 3600
+
+
+def export_data(conn, user_id):
+    """Volcado legible de todas las tablas del usuario (para JSON o rescate)."""
+    return {t: [dict(r) for r in conn.execute(
+                f"SELECT * FROM {t} WHERE user_id=? ORDER BY rowid", (user_id,))]
+            for t in USER_TABLES}
+
+
+def export_snapshot(user_id):
+    """Escribe backups/export-AAAAMMDD-HHMMSS.json y NO lo borra: los exports
+    son append-only — pesan nada y se leen sin la app."""
+    conn = get_db()
+    try:
+        data = {"exported_at": now(), "tables": export_data(conn, user_id)}
+    finally:
+        conn.close()
+    folder = backup_dir()
+    os.makedirs(folder, exist_ok=True)
+    dest = os.path.join(folder, "export-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".json")
+    n = 2
+    while os.path.exists(dest):
+        dest = dest[:-5] + f"-{n}.json"
+        n += 1
+    with open(dest, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=1)
+    return dest
 
 
 def local_user_id(conn) -> int:

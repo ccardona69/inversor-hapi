@@ -1,1250 +1,1546 @@
-const $ = s => document.querySelector(s);
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmt = (n,d=2) => n==null?'—':Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
-const cls = n => n==null?'':(n>=0?'pos':'neg');
-async function api(path, opts={}){
-  const r = await fetch('/api'+path,{headers:{'Content-Type':'application/json'},...opts,
-    body: opts.body?JSON.stringify(opts.body):undefined});
-  const data = await r.json().catch(()=>({}));
-  if(!r.ok){ data._status=r.status; throw data; }
-  return data;
-}
-window.addEventListener('hashchange', route);
-async function route(){
-  const [page, arg] = location.hash.replace('#','').split('/');
-  const aliases = {asistente:'inicio',alertas:'inicio',historial:'diario',perfil:'ajustes',config:'ajustes',operar:'analisis'};
-  const resolved = aliases[page]||page||'inicio';
-  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active', a.hash==='#'+resolved));
-  const views = {inicio,cartera,analisis,diario,oportunidades,ajustes};
-  try{ await (views[resolved]||inicio)(arg); }
-  catch(e){ $('#view').innerHTML=`<div class="card">Error: ${esc(e.detail||e.message||JSON.stringify(e))}</div>`; }
-}
-const DISC = '<p class="disc">Herramienta de apoyo con datos aportados por el usuario y fuentes públicas citadas. No es asesoría financiera regulada, no garantiza rentabilidad y no ejecuta operaciones.</p>';
+// Hapi IA - Inversion con criterio (Frontend SPA)
+// Diseno: portado de Hapi-IA-frontend (sidebar, temas, dialogos) sobre el backend real.
 
-/* ---------- 1. Hoy (panel principal con Luna) ---------- */
-let _lunaChat = [], _lunaSugs = [], _lunaConfigured = null;
-let _lastPriceRefresh = 0, _currentTickers = [];
+(() => {
+  "use strict";
 
-/* ---------- Mercado hoy y niveles por acción (regla técnica, no predicción) ---------- */
-const SEMAFORO_MKT = {normal:'ok', cauteloso:'warn', miedo:'err', sin_datos:'mut'};
-const SEMAFORO_ACC = {descuento:'ok', estirada:'warn', bajista:'err', neutral:'mut'};
-const pctS = (v,d=1) => v==null?'—':(v>0?'+':'')+fmt(v,d)+' %';
-const hora = iso => iso ? String(iso).replace('T',' ').slice(0,16) : '';
-function marketPulseHtml(p){
-  if(!p) return '<h3>Mercado hoy</h3><p class="sm mut">Sin datos de mercado ahora</p>';
-  const ok = (p.instrumentos||[]).filter(i=>!i.error);
-  return `<h3>Mercado hoy</h3>
-    <p class="sm"><span class="pill ${SEMAFORO_MKT[p.semaforo]||'mut'}">${esc((p.semaforo||'—').replaceAll('_',' '))}</span>
-      ${p.tipo_dia?`<b>Día ${esc(p.tipo_dia)}</b> · `:''}${esc(p.lectura||'')}</p>
-    <div class="mkt-chips">${ok.map(i=>`<span class="mkt-chip"><span class="mut">${esc(i.nombre)}</span>
-      <b>${fmt(i.price)}</b> <span class="${cls(i.day_change_pct)}">${pctS(i.day_change_pct)}</span></span>`).join('')}
-      ${(p.instrumentos||[]).filter(i=>i.error).map(i=>`<span class="mkt-chip mut">${esc(i.nombre)}: sin dato</span>`).join('')}</div>
-    <p class="sm mut">${esc(p.fuente||'')}${ok[0]?.asof?` · cotización ${esc(hora(ok[0].asof))}`:''} · leído ${esc(hora(p.fetched_at))}. ${esc(p.nota||'')}</p>`;
-}
-function nivelesHtml(n, posicion, extra=''){
-  if(!n) return `<p class="sm mut">Histórico insuficiente para niveles.</p>${extra}`;
-  const dc = posicion && posicion.avg_cost ? `<div>Desde tu costo ($ ${fmt(posicion.avg_cost)}): hoy <span class="${cls(posicion.desde_costo_pct)}">${pctS(posicion.desde_costo_pct)}</span>
-      · stop <span class="${cls(posicion.stop_desde_costo_pct)}">${pctS(posicion.stop_desde_costo_pct)}</span> · toma <span class="${cls(posicion.toma_desde_costo_pct)}">${pctS(posicion.toma_desde_costo_pct)}</span></div>` : '';
-  return `<p class="sm"><span class="pill ${SEMAFORO_ACC[n.semaforo]||'mut'}">${esc(n.semaforo)}</span>
-      ${n.tipo_dia?`<span class="pill mut">día ${esc(n.tipo_dia)}</span> `:''}${esc(n.lectura)}</p>
-    <div class="lv-grid sm">
-      <div>${n.entrada_zona?`<b>Entrada escalonada</b> $ ${fmt(n.entrada_zona[0])} – $ ${fmt(n.entrada_zona[1])}<div class="mut">${esc(n.entrada_nota)}</div>`:`<b>Entrada</b> <span class="mut">${esc(n.entrada_nota)}</span>`}</div>
-      <div><b>Stop loss</b> $ ${fmt(n.stop_loss)} <span class="neg">(${pctS(n.stop_loss_pct)})</span></div>
-      <div><b>Toma parcial</b> $ ${fmt(n.toma_parcial)} <span class="pos">(${pctS(n.toma_parcial_pct)})</span></div>
-      ${dc}
-    </div>${extra}
-    <p class="sm mut">${esc(n.regla)} Base $ ${fmt(n.precio_base)} · ATR14 ${fmt(n.atr14)}.</p>`;
-}
-async function loadLevels(tk){
-  const box = document.getElementById('lv-'+tk);
-  if(!box) return;
-  box.innerHTML = '<p class="sm mut">Calculando niveles…</p>';
-  try{
-    const r = await api('/levels/'+encodeURIComponent(tk));
-    const cur = document.getElementById('lv-'+tk); if(!cur) return;
-    const src = `<p class="sm mut">Precio $ ${fmt(r.precio.valor)} · ${esc(r.precio.fuente||'')} · ${esc(hora(r.precio.asof))}${r.tecnica?.error?` · ${esc(r.tecnica.error)}`:''}</p>`;
-    cur.innerHTML = `<b>Plan de niveles (regla ATR)</b>${nivelesHtml(r.niveles, r.posicion, src)}`;
-  }catch(e){
-    const cur = document.getElementById('lv-'+tk);
-    if(cur) cur.innerHTML = `<p class="sm" style="color:var(--err)">${esc(e.detail||'No se pudieron calcular los niveles.')}</p>`;
-  }
-}
-
-async function inicio(){
-  const pulseP = api('/market/pulse').catch(()=>null);
-  let [d, prof] = await Promise.all([api('/dashboard'), api('/profile')]);
-  let refreshMsg = '';
-  if(d.portfolio.positions.length && d.calidad_datos.some(q=>q.estado_precio!=='actual')
-     && Date.now()-_lastPriceRefresh > 5*60*1000){
-    _lastPriceRefresh = Date.now();
-    try{
-      const r = await api('/prices/refresh',{method:'POST'});
-      if(r.errors.length) refreshMsg = 'No se pudieron actualizar los precios de '+r.errors.map(e=>e.ticker).join(', ')+'. Ingrésalos manualmente en Cartera.';
-      else d = await api('/dashboard');
-    }catch(e){ refreshMsg = 'No se pudieron actualizar los precios. Revisa tu conexión o ingrésalos manualmente en Cartera.'; }
-  }
-  const t = d.portfolio.totals, positions = d.portfolio.positions;
-  const unverified = positions.filter(p=>!p.verified).length;
-  const priced = positions.filter(p=>p.price_info && p.price_info.asof);
-  const oldest = priced.length ? priced.reduce((a,b)=>b.price_info.asof<a.price_info.asof?b:a) : null;
-  _lunaSugs = ['¿Cómo va mi cartera hoy?','¿Qué tan concentrado estoy y qué alternativas tengo?'];
-  if(positions.length){
-    const top = positions.reduce((a,b)=>(b.market_value||0)>(a.market_value||0)?b:a);
-    _lunaSugs.push(`¿Qué debería vigilar de ${top.ticker}?`);
-  }
-  _lunaSugs.push((d.portfolio.cash||0)>=1 ? `¿Qué hago con mis $${fmt(d.portfolio.cash)} de efectivo?`
-                                         : '¿Qué me falta completar para decidir mejor?');
-  $('#view').innerHTML = `
-  <h2>Hoy</h2><p class="sub">Tu cartera de un vistazo y Luna para lo que no se ve en las cifras.</p>
-  ${refreshMsg?`<div class="alert">${esc(refreshMsg)}</div>`:''}
-  ${t.sin_precio_vigente.length?`<div class="alert riesgo_elevado">Total y riesgo no calculables: faltan valores vigentes en USD para ${esc(t.sin_precio_vigente.join(', '))}. Revisa precios y monedas en <a href="#cartera">Cartera</a>.</div>`:''}
-  ${d.portfolio.cash_currency!=='USD'?'<div class="alert riesgo_elevado">El efectivo no está en USD; el riesgo no se puede calcular sin un tipo de cambio verificable.</div>':''}
-  ${t.sin_costo.length?`<div class="alert">Resultado no calculable: falta el costo invertido de ${esc(t.sin_costo.join(', '))}.</div>`:''}
-  <div class="card" id="mkt-hoy" aria-live="polite"><h3>Mercado hoy</h3><p class="sm mut">Leyendo el mercado…</p></div>
-  <div class="stat-strip" aria-label="Resumen numérico">
-    <div><div class="mut sm">Valor actual</div><div class="big">${t.valor_actual==null?'—':'$ '+fmt(t.valor_actual)}</div></div>
-    <div><div class="mut sm">Cambio de hoy</div><div class="big ${cls(t.cambio_dia)}">${t.cambio_dia==null?'—':`$ ${fmt(t.cambio_dia)} (${fmt(t.cambio_dia_pct,1)} %)`}</div></div>
-    <div><div class="mut sm">Resultado total</div><div class="big ${cls(t.resultado)}">${t.resultado==null?'—':`$ ${fmt(t.resultado)} (${fmt(t.rendimiento_pct,1)} %)`}</div></div>
-    <div><div class="mut sm">Efectivo</div><div class="big">${d.portfolio.cash==null?'—':'$ '+fmt(d.portfolio.cash)}</div></div>
-  </div>
-  ${oldest?`<p class="sm mut" style="margin-top:-8px">Precio más antiguo: ${esc(oldest.ticker)} · ${esc(oldest.price_info.fuente||'sin fuente')} · ${esc(oldest.price_info.asof)}</p>`:''}
-  ${unverified?`<div class="alert">${unverified} posición(es) sin confirmar.
-    <button class="mini" onclick="verifyAllPositions()">Confirmar todo</button> o revísalas una por una en <a href="#cartera">Cartera</a>.</div>`:''}
-  <section class="luna-panel" aria-label="Conversación con Luna">
-    <h3>Pregúntale a Luna</h3>
-    <div class="luna-sugs">${_lunaSugs.map((s,i)=>`<button type="button" onclick="lunaSend(_lunaSugs[${i}])">${esc(s)}</button>`).join('')}</div>
-    <div id="luna-log" class="luna-log" aria-live="polite"></div>
-    <div class="luna-input-row">
-      <textarea id="luna-input" maxlength="600" rows="2" placeholder="Escribe tu pregunta…"></textarea>
-      <button id="luna-send" type="button" onclick="lunaSend()">Enviar</button>
-      <button id="luna-new" class="sec" type="button" onclick="lunaNew()">Nueva conversación</button>
-    </div>
-    <p class="luna-note" id="luna-status" role="status"></p>
-    <p class="luna-note">Luna usa tus datos guardados con su fuente y fecha. No opera ni cambia tu cartera. Cada mensaje es una consulta al proveedor de IA.</p>
-  </section>
-  ${positions.length?'':`<div class="card"><h3>Empezar</h3>
-    <p class="sm">Sube una captura de tu cartera en Hapi o registra tus posiciones manualmente.</p>
-    <a class="desk-action" href="#cartera">Ir a Cartera</a></div>`}
-  <div class="grid g2">
-  <div class="card"><h3>Distribución y concentración</h3>
-    ${Object.entries(t.pesos_pct||{}).map(([k,v])=>{const dp=positions.find(p=>p.ticker===k)?.day_change_pct;
-      return `<div class="row sm"><span style="width:60px"><b>${esc(k)}</b></span><span>${v} %</span>${dp==null?'':`<span class="${cls(dp)}">hoy ${pctS(dp)}</span>`}</div>`;}).join('')||`<p class="mut sm">${t.sin_precio_vigente.length?'Pendiente de valores vigentes en USD':'Sin posiciones valoradas'}</p>`}
-    ${d.risk.error?`<p class="sm mut">${esc(d.risk.error)}</p>`:`<p class="sm" style="margin-top:8px">Concentración: <span class="pill ${d.risk.nivel_concentracion==='alta'?'err':'ok'}">${esc(d.risk.nivel_concentracion||'—')}</span>
-     · HHI ${d.risk.hhi||'—'} · diversificación efectiva ≈ ${d.risk.diversificacion_efectiva||'—'} posiciones</p>`}
-    ${(d.risk.correlacion||[]).map(c=>`<div class="alert">${esc(c)}</div>`).join('')}
-  </div>
-  <div class="card"><h3>Alertas (${d.alerts.length})</h3>
-    ${d.alerts.slice(0,6).map(a=>`<div class="alert ${a.level}"><span class="pill mut">${esc(a.level.replaceAll('_',' '))}</span> ${esc(a.text)}</div>`).join('')||'<p class="mut sm">Sin alertas</p>'}
-  </div></div>
-  ${prof.complete?'':`<div class="card"><h3>Tu perfil de inversionista</h3>
-    <p class="sm mut">Con el perfil completo las propuestas pueden personalizarse.</p>
-    ${profileFormHtml(prof)}</div>`}
-  ${DISC}`;
-  window._rpFields = prof.fields;
-  pulseP.then(p=>{ const box=$('#mkt-hoy'); if(box) box.innerHTML = marketPulseHtml(p); });
-  renderLunaLog();
-  const input = $('#luna-input');
-  input.addEventListener('keydown', e=>{
-    if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); lunaSend(); }
-  });
-  try{
-    const s = await api('/assistant/status');
-    if(!$('#luna-input')) return;
-    _lunaConfigured = s.configured;
-    $('#luna-send').disabled = !s.configured;
-    $('#luna-input').disabled = !s.configured;
-    $('#luna-status').textContent = s.configured ? `Modelo: ${s.model}` : s.hint;
-  }catch(e){ if($('#luna-status')) $('#luna-status').textContent = e.detail||'No se pudo consultar el estado de Luna'; }
-}
-async function refreshPrices(){
-  const r = await api('/prices/refresh',{method:'POST'});
-  if(r.errors.length) alert('Algunos precios no se pudieron obtener:\n'+r.errors.map(e=>e.ticker+': '+e.error).join('\n')+'\nPuedes ingresarlos manualmente en Cartera.');
-  return r;
-}
-async function verifyAllPositions(){
-  const r = await api('/positions/verify_all',{method:'POST'});
-  inicio();
-  return r;
-}
-
-/* ---------- Chat de Luna (solo lectura; persiste al navegar, no al recargar) ---------- */
-function renderLunaLog(){
-  const log = $('#luna-log');
-  if(!log) return;
-  log.replaceChildren();
-  _lunaChat.forEach(m=>{
-    const wrap = document.createElement('div');
-    wrap.className = 'luna-msg '+(m.role==='user'?'user':'assistant');
-    const bubble = document.createElement('div');
-    bubble.className = 'luna-bubble';
-    bubble.textContent = m.content;
-    wrap.appendChild(bubble);
-    if(m.model){
-      const meta = document.createElement('div');
-      meta.className = 'luna-meta';
-      meta.textContent = `Modelo: ${m.model} · consulta ${m.asof||''}`;
-      wrap.appendChild(meta);
-    }
-    log.appendChild(wrap);
-  });
-  log.scrollTop = log.scrollHeight;
-}
-async function lunaSend(text){
-  const input = $('#luna-input'), send = $('#luna-send'), log = $('#luna-log');
-  const question = String(text ?? input?.value ?? '').trim();
-  if(!question || (send && send.disabled)) return;
-  if(input) input.value = '';
-  if(send) send.disabled = true;
-  const userMsg = {role:'user', content:question};
-  _lunaChat.push(userMsg);
-  renderLunaLog();
-  const thinking = document.createElement('div');
-  thinking.className = 'luna-msg assistant';
-  thinking.id = 'luna-thinking';
-  const tb = document.createElement('div');
-  tb.className = 'luna-bubble luna-thinking';
-  tb.textContent = 'Luna está pensando…';
-  thinking.appendChild(tb);
-  log.appendChild(thinking);
-  log.scrollTop = log.scrollHeight;
-  const history = _lunaChat.slice(0,-1).filter(m=>!m.error).slice(-8)
-    .map(m=>({role:m.role, content:m.content.slice(0,4000)}));
-  try{
-    const r = await api('/assistant/ask',{method:'POST',body:{question, history}});
-    thinking.remove();
-    _lunaChat.push({role:'assistant', content:r.answer, model:r.model, asof:r.asof});
-  }catch(e){
-    thinking.remove();
-    userMsg.error = true;
-    _lunaChat.push({role:'assistant', error:true, content:'No se pudo consultar a Luna: '+(e.detail||'error de conexión')+'. Inténtalo de nuevo.'});
-  }
-  renderLunaLog();
-  if(send) send.disabled = _lunaConfigured===false;
-}
-function lunaNew(){ _lunaChat = []; renderLunaLog(); }
-
-/* ---------- 2. Cartera ---------- */
-async function cartera(){
-  const [pf, val] = await Promise.all([api('/portfolio'), api('/validate')]);
-  const t = pf.totals, cash = pf.cash;
-  const balance = t.valor_actual==null ? null : t.valor_actual + (cash||0);
-  const pctOf = n => balance ? fmt(n/balance*100,1)+' % del balance' : '— %';
-  const sgn = n => n>=0?'+':'-';
-  const plFmt = p => p.unrealized_pl==null ? '—'
-    : `${sgn(p.unrealized_pl)}$ ${fmt(Math.abs(p.unrealized_pl))}${p.return_pct==null?'':` (${sgn(p.return_pct)}${fmt(Math.abs(p.return_pct))} %)`}`;
-  const DONUT = ['#0d6e5f','#3f9c86','#8fd0bf','#173430','#6f8f86','#b7d9cf'];
-  const valued = pf.positions.filter(p=>p.market_value!=null);
-  const donutTotal = valued.reduce((s,p)=>s+p.market_value,0);
-  let _acc = 0;
-  const donutBg = donutTotal>0
-    ? 'conic-gradient('+valued.map((p,i)=>{const a=_acc;_acc+=p.market_value/donutTotal*100;
-        return `${DONUT[i%DONUT.length]} ${a}% ${_acc}%`;}).join(', ')+')'
-    : 'var(--acc2)';
-  $('#view').innerHTML = `
-  <h2>Cartera</h2><p class="sub">Lo que tienes hoy y cómo actualizarlo desde Hapi.</p>
-  <div class="card"><h3>Tu cartera hoy</h3>
-    ${t.sin_precio_vigente.length?`<div class="alert riesgo_elevado">El valor de algunas filas proviene de capturas, no está disponible o no está en USD. No hay un total actual fiable: ${esc(t.sin_precio_vigente.join(', '))}.</div>`:''}
-    ${pf.cash_currency!=='USD'?`<div class="alert riesgo_elevado">Efectivo registrado en ${esc(pf.cash_currency)}: introduce el importe real en USD solo si lo verificaste; no se convierte automáticamente.</div>`:''}
-    <div class="pf-top">
-      <div>
-        <div class="mut sm">Balance total</div>
-        <div class="big pf-balance-num">${balance==null?'—':'$ '+fmt(balance)}</div>
-        <div class="sm pf-line">En acciones <b>${t.valor_actual==null?'—':'$ '+fmt(t.valor_actual)}</b> <span class="mut">· ${pctOf(t.valor_actual||0)}</span></div>
-        <div class="sm pf-line">Efectivo <b>${cash==null?'—':'$ '+fmt(cash)}</b> <span class="mut">· ${cash==null?'— %':pctOf(cash)}</span></div>
-        <p class="sm mut pf-totals">Invertido $ ${fmt(t.invertido)} · Resultado <span class="${cls(t.resultado)}">${t.resultado==null?'—':`${sgn(t.resultado)}$ ${fmt(Math.abs(t.resultado))}${t.rendimiento_pct==null?'':` (${sgn(t.rendimiento_pct)}${fmt(Math.abs(t.rendimiento_pct))} %)`}`}</span></p>
-      </div>
-      <div class="pf-donut-zone">
-        <div class="donut" style="background:${donutBg}" role="img" aria-label="Distribución de las posiciones"></div>
-        <div class="donut-legend">${valued.map((p,i)=>`<span class="donut-chip"><i class="dot" style="background:${DONUT[i%DONUT.length]}"></i>${esc(p.ticker)} ${fmt(p.market_value/donutTotal*100,1)} %</span>`).join('')||'<span class="mut sm">Sin posiciones valoradas</span>'}</div>
-      </div>
-    </div>
-  </div>
-  <div class="card"><h3>Mis activos</h3>
-    ${pf.positions.map(p=>`
-    <details class="asset-row" data-tk="${esc(p.ticker)}">
-      <summary>
-        <span class="asset-ic">${esc((p.ticker||'?').charAt(0))}</span>
-        <span class="asset-main"><b>${esc(p.ticker)}</b><span class="sm mut">${p.name?esc(p.name)+' · ':''}${p.qty} acciones</span></span>
-        <span class="asset-val"><b>${p.market_value==null?`— ${esc(p.currency)}`:`${esc(p.currency)} ${fmt(p.market_value)}`}</b><span class="sm ${cls(p.unrealized_pl)}">${plFmt(p)}</span></span>
-      </summary>
-      <div class="asset-detail">
-        <div><div class="mut sm">Costo prom.</div>$ ${fmt(p.avg_cost)}</div>
-        <div><div class="mut sm">Invertido</div>$ ${fmt(p.invested)}</div>
-        <div><div class="mut sm">Precio usado</div>${fmt(p.price_info.precio_usado)}
-          <div class="sm mut">${esc(p.price_info.fuente||'')}</div>
-          <div class="sm mut">${esc(p.price_info.asof||'fecha no registrada')}</div></div>
-        <div class="asset-flags">
-          <span class="pill ${p.price_status==='actual'?'ok':'warn'}">${esc(p.price_status.replaceAll('_',' '))}</span>
-          ${p.verified?'<span class="pill ok">verificada</span>':`<button class="mini sec" onclick="api('/positions/${p.ticker}/verify',{method:'POST'}).then(cartera)">Confirmar datos</button>`}
-          <button class="mini danger" onclick="if(confirm('¿Eliminar ${p.ticker}?'))api('/positions/${p.ticker}',{method:'DELETE'}).then(cartera)">✕</button>
-        </div>
-        <div class="asset-levels lv-box" id="lv-${esc(p.ticker)}"></div>
-      </div>
-    </details>`).join('')||'<p class="mut sm">Aún no tienes posiciones. Sincroniza con una foto de Hapi o agrégalas desde Herramientas avanzadas.</p>'}
-  </div>
-  <div class="card"><h3>Sincronizar con Hapi (foto)</h3>
-    <p class="sm mut">Sube una captura de tus posiciones en la app de Hapi: el modelo de visión configurado
-      extrae los datos, tú los revisas en una tabla editable y confirmas para sincronizar. Nada se guarda sin tu confirmación.</p>
-    <div class="row">
-      <input type="file" id="ph-file" accept="image/*" style="max-width:320px" onchange="photoPreviewName(this)">
-      <button onclick="photoAnalyze()">Analizar captura</button>
-      <span id="ph-status" class="sm mut"></span>
-    </div>
-    <div id="ph-map"></div>
-  </div>
-  <div class="card"><div class="row">
-    <button class="sec" onclick="refreshPrices().then(cartera)">Actualizar precios (Yahoo Finance)</button>
-    <span class="sm mut">Efectivo disponible (USD): $</span><input id="cash" style="width:110px" value="${pf.cash??''}">
-    <button class="mini" onclick="if($('#cash').value===''){alert('Ingresa el efectivo en USD antes de guardarlo.');return}api('/cash',{method:'PUT',body:{amount:+$('#cash').value}}).then(cartera)">Guardar</button></div>
-  </div>
-  <details class="card"><summary>Herramientas avanzadas</summary>
-  <div class="card"><h3>Operaciones ejecutadas — revisar captura</h3>
-    <p class="sm mut">Solo órdenes ejecutadas, no posiciones ni órdenes pendientes. El modelo puede omitir datos: contrasta cada fila con Hapi. Analizar la foto puede generar costo del proveedor de IA; importar no calcula ni aplica costos.</p>
-    <div class="row"><input type="file" id="tr-file" accept="image/*" style="max-width:320px" onchange="tradePhotoChanged()">
-      <button id="tr-analyze" type="button" onclick="tradePhotoAnalyze()">Analizar operaciones</button>
-      <span id="tr-status" class="sm mut" role="status"></span></div>
-    <div id="tr-review"></div>
-  </div>
-  <div class="card"><h3>Libro de operaciones y costo por ticker</h3>
-    <p class="sm mut">Comprueba que el libro incluya todas las compras y ventas desde cero. Si hubo splits o transferencias, este libro no puede reflejarlos: no apliques el costo. Un historial parcial tampoco permite calcularlo. SQLite puede perder precisión al almacenar los importes.</p>
-    <div class="row"><label for="tr-ticker" style="margin:0">Ticker</label>
-      <input id="tr-ticker" style="width:135px" placeholder="p. ej. VOO" oninput="tradeLedgerChanged()">
-      <button class="sec" type="button" onclick="loadTrades()">Ver operaciones guardadas</button></div>
-    <div id="tr-ledger" class="sm mut" role="status">Elige un ticker para ver el libro.</div>
-    <div class="review-step"><h4>Conciliar costo con la posición</h4>
-      <p class="sm mut">Solo con historial completo, sin ajustes no modelados y una posición verificada en USD. La vista previa no modifica la posición.</p>
-      <label for="tr-confirmed-qty">Acciones actuales comprobadas en Hapi (escríbelas, no se rellenan automáticamente)</label>
-      <input id="tr-confirmed-qty" inputmode="decimal" style="max-width:210px" oninput="clearReconcile()" placeholder="Cantidad exacta">
-      <label class="review-check"><input id="tr-complete" type="checkbox" onchange="clearReconcile()">Confirmo que revisé todas las compras y ventas desde el inicio y que el libro está completo.</label>
-      <label class="review-check"><input id="tr-no-adjust" type="checkbox" onchange="clearReconcile()">Confirmo que no hubo splits, transferencias ni otros ajustes de acciones o costo no representados en el libro.</label>
-      <button class="sec" type="button" onclick="previewReconcile()">Calcular vista previa</button>
-      <div id="tr-reconcile" role="status"></div>
-    </div>
-  </div>
-  <div class="grid g2">
-  <div class="card"><h3>Agregar / editar posición</h3>
-    <div class="grid g2">
-    <div><label>Ticker</label><input id="p-tk"></div><div><label>Nombre</label><input id="p-name"></div>
-    <div><label>Cantidad</label><input id="p-qty" type="number" step="any"></div>
-    <div><label>Costo promedio (USD)</label><input id="p-avg" type="number" step="any"></div>
-    <div><label>Invertido total (USD, opcional)</label><input id="p-inv" type="number" step="any"></div>
-    <div><label>Fuente del dato</label><input id="p-src" value="manual"></div></div>
-    <button style="margin-top:10px" onclick="addPos()">Guardar posición</button></div>
-  <div class="card"><h3>Precio manual (si la fuente falla)</h3>
-    <div class="grid g2"><div><label>Ticker</label><input id="mp-tk"></div>
-    <div><label>Precio USD</label><input id="mp-p" type="number" step="any"></div>
-    <div><label>Fecha/hora (ISO)</label><input id="mp-asof" value="${new Date().toISOString().slice(0,16)}"></div>
-    <div><label>Fuente</label><input id="mp-src" placeholder="p. ej. app de Hapi, 19/07 10:30"></div></div>
-    <button class="sec" style="margin-top:10px" onclick="manualPrice()">Registrar precio</button></div>
-  </div>
-  <div class="card"><h3>Validación de datos</h3>
-  ${val.report.map(r=>`<details><summary>${r.ticker} ${r.inconsistencias.length?`<span class="pill err">${r.inconsistencias.length} inconsistencia(s)</span>`:'<span class="pill ok">coherente</span>'}</summary>
-    ${r.inconsistencias.map(x=>`<div class="alert riesgo_elevado">⚠️ ${esc(x)}</div>`).join('')}
-    <p class="sm"><b>Confirmados:</b></p><ul class="sm">${r.confirmados.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>
-    <p class="sm"><b>Calculados:</b></p><ul class="sm">${r.calculados.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>
-    <p class="sm"><b>Pendientes de verificación:</b></p><ul class="sm">${r.pendientes.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>
-  </details>`).join('')||'<p class="mut sm">Sin posiciones que validar.</p>'}</div></details>${DISC}`;
-  _currentTickers = pf.positions.map(p=>p.ticker);
-  document.querySelectorAll('details.asset-row').forEach(d=>d.addEventListener('toggle', ()=>{
-    if(d.open && !d.dataset.levelsLoaded){ d.dataset.levelsLoaded = '1'; loadLevels(d.dataset.tk); }
-  }));
-  photoStatus();
-}
-async function addPos(){
-  await api('/positions',{method:'POST',body:{ticker:$('#p-tk').value,name:$('#p-name').value,
-    qty:+$('#p-qty').value, avg_cost:$('#p-avg').value?+$('#p-avg').value:null,
-    invested:$('#p-inv').value?+$('#p-inv').value:null, source:$('#p-src').value||'manual'}});
-  cartera();
-}
-async function manualPrice(){
-  await api('/prices/manual',{method:'POST',body:{ticker:$('#mp-tk').value,price:+$('#mp-p').value,
-    asof:$('#mp-asof').value,source:$('#mp-src').value||'ingreso manual'}});
-  alert('Precio registrado con su fuente y fecha'); cartera();
-}
-
-/* ---------- Sincronizar con Hapi por foto (IA de visión) ---------- */
-async function photoStatus(){
-  try{
-    const s = await api('/hapi/photo/status');
-    $('#ph-status').innerHTML = s.configured
-      ? `<span class="pill ok">IA lista</span> <span class="sm mut">${esc(s.model)}</span>`
-      : `<span class="pill warn">IA no configurada</span> <span class="sm mut">${esc(s.hint)}</span>`;
-    return s.configured;
-  }catch(e){ return false; }
-}
-function photoPreviewName(input){
-  $('#ph-status').textContent = input.files[0] ? `Listo para analizar: ${input.files[0].name}` : '';
-}
-function photoShrink(file){
-  return new Promise((res, rej)=>{
-    const img = new Image(), fr = new FileReader();
-    fr.onload = ()=>{ img.onload = ()=>{
-      const mx = 1600, s = Math.min(1, mx/Math.max(img.width, img.height));
-      const cv = document.createElement('canvas');
-      cv.width = Math.round(img.width*s); cv.height = Math.round(img.height*s);
-      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
-      res(cv.toDataURL('image/jpeg', 0.85));
-    }; img.onerror = ()=>rej('imagen ilegible'); img.src = fr.result; };
-    fr.onerror = ()=>rej('no se pudo leer el archivo');
-    fr.readAsDataURL(file);
-  });
-}
-async function photoAnalyze(){
-  const f = $('#ph-file').files[0];
-  if(!f){ alert('Primero elige una captura de tu cartera en Hapi.'); return; }
-  $('#ph-map').innerHTML = '<p class="mut">Analizando la captura con el modelo de visión…</p>';
-  let b64;
-  try{ b64 = await photoShrink(f); }
-  catch(e){ $('#ph-map').innerHTML = `<p class="sm" style="color:var(--err)">${esc(String(e))}</p>`; return; }
-  let r;
-  try{ r = await api('/hapi/photo/analyze',{method:'POST',body:{image_b64:b64,mime:'image/jpeg'}}); }
-  catch(e){ $('#ph-map').innerHTML = `<div class="alert riesgo_elevado">${esc(e.detail||'Error al analizar')}</div>`; return; }
-  if(!r.rows.length){
-    $('#ph-map').innerHTML = '<div class="alert">La IA no detectó posiciones en la captura. ' +
-      (r.omitted.length? esc(JSON.stringify(r.omitted)) : 'Usa una captura de la pantalla de Portafolio/Posiciones, completa y legible.') + '</div>';
-    return;
-  }
-  const num=(k,v)=>`<input id="ph-${k}" type="number" step="any" value="${v??''}">`;
-  const invCell=(x,i)=>{
-    const empty = x.invested==null || x.invested==='';
-    const derived = empty && x.hapi_value!=null && x.hapi_pl!=null
-      ? Math.round((x.hapi_value - x.hapi_pl)*100)/100 : x.invested;
-    return num(i+'-inv', derived) + (empty && derived!=null && derived!==''
-      ? '<br><span class="sm mut">calculado: valor − P/L</span>' : '');
+  const icons = {
+    grid:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+    wallet:'<path d="M20 7V5a2 2 0 0 0-2-2H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h14a1 1 0 0 0 1-1v-5"/><path d="M3 6a2 2 0 0 0 2 2h15a1 1 0 0 1 1 1v6h-5a3 3 0 0 1 0-6h5"/><path d="M16.5 12h.01"/>',
+    compass:'<circle cx="12" cy="12" r="9"/><path d="m16 8-2.5 5.5L8 16l2.5-5.5L16 8Z"/>',
+    sparkles:'<path d="m12 3 2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4L12 3Z"/><path d="M20 2v4M18 4h4"/>',
+    activity:'<path d="M4 4h16M4 12h16M4 20h10"/><path d="m17 17 3 3-3 3"/>',
+    book:'<path d="M12 5v16M3 4c4-1 7 0 9 1 2-1 5-2 9-1v15c-4-1-7 0-9 2-2-2-5-3-9-2V4Z"/>',
+    moon:'<path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z"/>',
+    sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2m-17-7 1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>',
+    help:'<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 4.7 1.3c-.7 1-2.2 1.2-2.2 2.7M12 16h.01"/>',
+    x:'<path d="m6 6 12 12M18 6 6 18"/>',
+    menu:'<path d="M4 6h16M4 12h16M4 18h16"/>',
+    search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+    info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',
+    chevron:'<path d="m9 5 7 7-7 7"/>',
+    chevdown:'<path d="m6 9 6 6-6-6"/>',
+    arrow:'<path d="M4 12h16m-6-6 6 6-6 6"/>',
+    arrowup:'<path d="M7 17 17 7M7 7h10v10"/>',
+    arrowdown:'<path d="M17 7 7 17M7 17h10V7"/>',
+    external:'<path d="M7 17 17 7M7 7h10v10"/>',
+    download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/>',
+    eye:'<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
+    eyeoff:'<path d="m3 3 18 18M10.6 5.1 12 5c6.5 0 10 7 10 7a20 20 0 0 1-3.3 4.2M6.3 6.3A20 20 0 0 0 2 12s3.5 7 10 7c1.8 0 3.5-.6 5-1.4M10 10a3 3 0 0 0 4 4"/>',
+    star:'<path d="m12 3 2.8 5.7 6.3.9-4.6 4.4 1.1 6.3-5.6 3-5.6 3 1.1-6.3L2.9 9.6l6.3-.9L12 3Z"/>',
+    check:'<path d="m5 12 4 4L19 6"/>',
+    shield:'<path d="m12 3 8 3v6c0 4-4 7-8 9-4-2-8-5-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/>',
+    send:'<path d="m21 3-6 18-4-8-8-4 18-6ZM11 13 21 3"/>',
+    plus:'<path d="M12 5v14M5 12h14"/>',
+    trend:'<path d="m3 17 6-6 4 4 8-10M15 5h6v6"/>',
+    lock:'<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+    sliders:'<path d="M10 5H3"/><path d="M12 19H3"/><path d="M14 3v4"/><path d="M16 17v4"/><path d="M21 12h-9"/><path d="M21 19h-5"/><path d="M21 5h-7"/><path d="M8 10v4"/>',
+    settings:'<path d="M14 17H5"/><path d="M19 7h-9"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
+    camera:'<path d="M14 5a2 2 0 0 1 1.76 1.05l.49.9A2 2 0 0 0 18 8h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2h2a2 2 0 0 0 1.76-1.05l.49-.9A2 2 0 0 1 10 5z"/><circle cx="12" cy="13" r="3"/>',
+    refresh:'<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+    trash:'<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+    target:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+    alert:'<path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>',
+    clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'
   };
-  $('#ph-map').innerHTML = `
-   <p class="sm" style="margin-top:10px">Detectado con <b>${esc(r.model)}</b>. Revisa cada dato contra tu app de Hapi y corrige lo que haga falta
-     (los campos vacíos son datos que la IA no vio; no se inventan):</p>
-   <table><tr><th>Ticker</th><th>Cantidad</th><th>Costo prom.</th><th>Invertido</th><th>Valor</th><th>P/L</th><th>P/L %</th></tr>
-   ${r.rows.map((x,i)=>`<tr><td><b>${esc(x.ticker)}</b><br><span class="sm mut">${esc(x.name||'')}</span></td>
-     <td>${num(i+'-qty',x.qty)}</td><td>${num(i+'-avg',x.avg_cost)}</td><td>${invCell(x,i)}</td>
-     <td>${num(i+'-val',x.hapi_value)}</td><td>${num(i+'-pl',x.hapi_pl)}</td><td>${num(i+'-plp',x.hapi_return_pct)}</td></tr>`).join('')}
-   </table>
-   ${r.omitted.length?`<p class="sm mut">${r.omitted.length} fila(s) descartada(s) por datos incompletos: ${esc(JSON.stringify(r.omitted))}</p>`:''}
-   <label class="review-check"><input id="ph-confirm" type="checkbox">Revisé cada dato contra Hapi.</label>
-   <label class="review-check"><input id="ph-replace" type="checkbox">Esta captura muestra toda mi cartera: quitar las posiciones que no aparecen.</label>
-   <div class="row" style="margin-top:8px">
-     <label style="margin:0">Efectivo / poder de compra (USD)</label>
-     <input id="ph-cash" type="number" step="any" style="width:120px" value="${r.cash??''}">
-     <button onclick="photoSave(${r.rows.length})">Sincronizar ${r.rows.length} posición(es)</button>
-     <span id="ph-save-status" class="sm mut" role="status"></span>
-     <span class="sm mut">Con tu confirmación quedan verificadas; la captura queda como fuente.</span>
-   </div>`;
-  window._photoRows = r.rows;
-}
-async function photoSave(n){
-  const rows = [];
-  window._photoRows.forEach((x,i)=>{
-    const g=k=>{ const v=$('#ph-'+i+'-'+k).value; return v===''?null:+v; };
-    rows.push({ticker:x.ticker, name:x.name, qty:g('qty'), avg_cost:g('avg'),
-      invested:g('inv'), hapi_value:g('val'), hapi_pl:g('pl'), hapi_return_pct:g('plp')});
-  });
-  if(!$('#ph-confirm')?.checked){
-    $('#ph-save-status').textContent = 'Marca «Revisé cada dato contra Hapi» para guardar la sincronización.';
-    return;
-  }
-  const replace = !!$('#ph-replace')?.checked;
-  if(replace){
-    const keep = new Set(rows.map(r2=>String(r2.ticker||'').toUpperCase()));
-    const remove = _currentTickers.filter(t=>!keep.has(t));
-    if(!confirm(remove.length
-      ? `Se quitarán de tu cartera: ${remove.join(', ')}.\n¿Continuar con la sincronización?`
-      : 'La captura cubre todas tus posiciones; no se quitará ninguna. ¿Continuar?')) return;
-  }
-  const cashEl = $('#ph-cash');
-  const body = {rows, confirmed:true, replace_all:replace};
-  if(cashEl && cashEl.value!=='') body.cash = +cashEl.value;
-  try{
-    const r = await api('/hapi/photo/save',{method:'POST',body});
-    alert(r.detail + (r.omitidas.length?`\n\nOmitidas ${r.omitidas.length} fila(s).`:'')
-      + (r.eliminadas && r.eliminadas.length?`\nQuitadas de tu cartera: ${r.eliminadas.join(', ')}`:''));
-    cartera();
-  }catch(e){ alert(e.detail||'Error al sincronizar'); }
-}
+  const icon = (key, extra = "") => `<svg class="icon ${extra}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[key] || icons.info}</svg>`;
+  const hydrateIcons = (root = document) => root.querySelectorAll("[data-icon]").forEach(el => { el.innerHTML = icon(el.dataset.icon); });
+  const escapeHtml = value => String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+  const priceFormatter = new Intl.NumberFormat("en-US", {minimumFractionDigits:2, maximumFractionDigits:2});
+  const money = value => `${value < 0 ? "−" : ""}$${priceFormatter.format(Math.abs(value))}`;
+  const soles = value => `S/ ${priceFormatter.format(Math.abs(value))}`;
+  const pct = value => `${value >= 0 ? "+" : "−"}${Math.abs(value).toFixed(2)}%`;
+  const round = value => Math.round(value * 100) / 100;
 
-/* ---------- Órdenes ejecutadas: foto, libro y conciliación explícita ---------- */
-let _tradeRows = null, _tradeModel = null, _reconcilePreview = null, _tradeVersion = 0;
-const reviewError = (e, fallback) => typeof e?.detail === 'string' ? e.detail : (e?.detail ? JSON.stringify(e.detail) : fallback);
-function imagePayload(dataUrl){
-  const b64 = dataUrl.split(',')[1];
-  if(!b64 || b64.length > 6*1024*1024) throw new Error('La imagen comprimida supera 6 MB en base64. Recorta la captura y vuelve a intentarlo.');
-  return b64;
-}
-function tradePhotoChanged(){
-  _tradeVersion++; _tradeRows = null; _tradeModel = null;
-  $('#tr-review').replaceChildren();
-  $('#tr-status').textContent = $('#tr-file').files[0] ? `Listo para analizar: ${$('#tr-file').files[0].name}` : '';
-}
-async function tradePhotoAnalyze(){
-  const file = $('#tr-file').files[0], button = $('#tr-analyze');
-  if(!file || !file.type.startsWith('image/')){ $('#tr-status').textContent='Selecciona una imagen de órdenes ejecutadas.'; return; }
-  const version=++_tradeVersion;
-  _tradeRows = null; _tradeModel = null; $('#tr-review').replaceChildren();
-  button.disabled = true; $('#tr-status').textContent='Analizando con el proveedor de IA…';
-  try{
-    const image_b64 = imagePayload(await photoShrink(file));
-    const r = await api('/trades/photo/analyze',{method:'POST',body:{image_b64,mime:'image/jpeg'}});
-    if(!$('#tr-review') || version!==_tradeVersion || $('#tr-file').files[0]!==file) return;
-    _tradeRows = r.rows; _tradeModel = r.model;
-    $('#tr-status').textContent = `${r.rows.length} orden(es) para revisar · modelo: ${r.model}`;
-    $('#tr-review').innerHTML = `
-      <div class="review-step"><h4>Revisa cada orden contra Hapi</h4>
-        <p class="sm mut">Vacío significa no visible, no cero. Cantidad, precio y comisión se escriben como decimales sin separadores; cero en comisión solo si está comprobado. Fecha ISO y USD deben constar en la orden o en tu fuente verificable.</p>
-        ${r.rows.length?`<table class="review-table"><tr><th>Revisé</th><th>Ticker</th><th>Compra/venta</th><th>Acciones</th><th>USD/acción</th><th>Comisión USD</th><th>Fecha/hora ISO</th><th>Moneda</th><th>ID orden</th></tr>
-          ${r.rows.map((x,i)=>`<tr>
-            <td><input id="tr-${i}-review" type="checkbox" aria-label="Revisé orden ${i+1}"></td>
-            <td><input id="tr-${i}-ticker" class="narrow-field" aria-label="Ticker orden ${i+1}" value="${esc(x.ticker??'')}"></td>
-            <td><select id="tr-${i}-side" aria-label="Lado orden ${i+1}"><option value="">Sin identificar</option><option value="comprar" ${x.side==='comprar'?'selected':''}>Compra</option><option value="vender" ${x.side==='vender'?'selected':''}>Venta</option></select></td>
-            <td><input id="tr-${i}-qty" class="narrow-field" inputmode="decimal" aria-label="Acciones orden ${i+1}" value="${esc(x.qty??'')}"></td>
-            <td><input id="tr-${i}-price" class="narrow-field" inputmode="decimal" aria-label="Precio orden ${i+1}" value="${esc(x.price??'')}"></td>
-            <td><input id="tr-${i}-fees" class="narrow-field" inputmode="decimal" aria-label="Comisión orden ${i+1}" value="${esc(x.fees??'')}"></td>
-            <td><input id="tr-${i}-at" class="wide-field" aria-label="Fecha ISO orden ${i+1}" placeholder="YYYY-MM-DD o fecha y hora" value="${esc(x.at??'')}"></td>
-            <td><select id="tr-${i}-currency" aria-label="Moneda orden ${i+1}"><option value="">No confirmada</option><option value="USD" ${x.currency==='USD'?'selected':''}>USD</option></select></td>
-            <td><input id="tr-${i}-order_id" class="wide-field" aria-label="ID orden ${i+1}" value="${esc(x.order_id??'')}"></td></tr>`).join('')}</table>`:'<p class="alert">No se detectaron órdenes ejecutadas. Revisa las omisiones y usa una captura legible.</p>'}
-        ${r.omitted.length?`<div class="alert"><b>Operaciones omitidas (${r.omitted.length}):</b><ul>${r.omitted.map(x=>`<li class="review-output">${esc(typeof x==='string'?x:JSON.stringify(x))}</li>`).join('')}</ul>Comprueba estas operaciones antes de considerar completo el libro.</div>`:''}
-        ${r.rows.length?`<label for="tr-source">Fuente de estas órdenes (obligatoria)</label>
-          <input id="tr-source" placeholder="p. ej. Historial de órdenes Hapi (indica la fecha de la captura)">
-          <p class="sm mut">Al importar solo se registran estas órdenes. Duplicados requieren una segunda confirmación; no se marca el libro como completo ni se cambia el costo de la posición.</p>
-          <button id="tr-import" type="button" onclick="tradeImport()">Importar órdenes revisadas</button>
-          <p id="tr-import-status" class="sm" role="status"></p>`:''}
-      </div>`;
-  }catch(e){ if($('#tr-status') && version===_tradeVersion) $('#tr-status').textContent=reviewError(e,e.message||'No se pudo analizar la imagen.'); }
-  finally{ if($('#tr-analyze')) button.disabled=false; }
-}
-function reviewedTradeRows(){
-  if(!_tradeRows?.length) throw new Error('Analiza una captura con operaciones antes de importar.');
-  const decimal = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
-  return _tradeRows.map((_,i)=>{
-    const g=k=>$('#tr-'+i+'-'+k).value.trim();
-    if(!$('#tr-'+i+'-review').checked) throw new Error(`Revisa y marca la orden ${i+1} antes de importar todas las filas.`);
-    const row={ticker:g('ticker').toUpperCase(),side:g('side'),qty:g('qty'),price:g('price'),
-      fees:g('fees'),at:g('at'),currency:g('currency'),order_id:g('order_id')||null};
-    if(!/^[A-Z][A-Z0-9]{0,9}(?:[.-][A-Z0-9]{1,5})?$/.test(row.ticker) || !row.side ||
-       !decimal.test(row.qty) || row.qty==='0' || !decimal.test(row.price) || row.price==='0' ||
-       !decimal.test(row.fees) || !row.at || row.currency!=='USD')
-      throw new Error(`Orden ${i+1}: confirma ticker, compra/venta, cantidad y precio positivos, comisión visible (0 solo si consta), fecha ISO y moneda USD.`);
-    return row;
-  });
-}
-async function tradeImport(){
-  const button=$('#tr-import'), status=$('#tr-import-status');
-  let rows, source;
-  try{ rows=reviewedTradeRows(); source=$('#tr-source').value.trim(); if(!source) throw new Error('Indica la fuente verificable de las órdenes.'); }
-  catch(e){ status.textContent=e.message; return; }
-  button.disabled=true; status.textContent='Importando órdenes revisadas…';
-  const body={rows,source,model:_tradeModel,reviewed:true,allow_duplicates:false};
-  try{
-    let result;
-    try{ result=await api('/trades/import',{method:'POST',body}); }
-    catch(e){
-      const detail=reviewError(e,'Error al importar órdenes.');
-      if(!(e._status===409 || /duplicad/i.test(detail))) throw e;
-      status.textContent=detail;
-      if(!confirm(`${detail}\n\n¿Confirmas importar estas mismas órdenes aunque puedan estar duplicadas? Comprueba los ID y las fechas en Hapi.`)) return;
-      result=await api('/trades/import',{method:'POST',body:{...body,allow_duplicates:true}});
-    }
-    if(!$('#tr-import-status')) return;
-    status.textContent=result.detail||'Órdenes guardadas con su fuente. El costo de la posición no cambió.';
-    _tradeRows=null; button.disabled=true;
-    const tickers=[...new Set(rows.map(x=>x.ticker))];
-    $('#tr-ticker').value=tickers[0];
-    clearReconcile();
-    await loadTrades();
-    if(tickers.length>1) status.textContent+=` Otros tickers importados: ${tickers.slice(1).join(', ')}. Consúltalos por separado.`;
-  }catch(e){ if($('#tr-import-status')) status.textContent=reviewError(e,'No se pudieron importar las órdenes.'); }
-  finally{ if($('#tr-import') && _tradeRows) button.disabled=false; }
-}
-function tradeLedgerChanged(){ clearReconcile(); $('#tr-ledger').textContent='Pulsa «Ver operaciones guardadas» para este ticker.'; }
-async function loadTrades(){
-  const ticker=$('#tr-ticker').value.trim().toUpperCase(), output=$('#tr-ledger');
-  clearReconcile();
-  if(!/^[A-Z][A-Z0-9]{0,9}(?:[.-][A-Z0-9]{1,5})?$/.test(ticker)){ output.textContent='Indica un ticker válido.'; return; }
-  output.textContent='Consultando libro…';
-  try{
-    const r=await api('/trades?ticker='+encodeURIComponent(ticker));
-    if($('#tr-ticker')?.value.trim().toUpperCase()!==ticker) return;
-    output.innerHTML=r.trades.length?`<p><b>${esc(ticker)}</b>: ${r.trades.length} operación(es) guardada(s). Verifica que no falten compras, ventas, splits ni transferencias.</p>
-      <table class="review-table"><tr><th>Fecha</th><th>Lado</th><th>Acciones</th><th>USD/acción</th><th>Comisión</th><th>Moneda</th><th>ID orden</th><th>Fuente</th></tr>
-      ${r.trades.map(x=>`<tr><td>${esc(x.at)}</td><td>${esc(x.side)}</td><td>${esc(x.qty)}</td><td>${esc(x.price)}</td><td>${esc(x.fees)}</td><td>${esc(x.currency)}</td><td>${esc(x.order_id)}</td><td>${esc(x.source)}</td></tr>`).join('')}</table>`:
-      '<p class="alert">No hay órdenes guardadas para este ticker. No concilies sin un historial completo.</p>';
-  }catch(e){ if($('#tr-ledger')) output.textContent=reviewError(e,'No se pudo cargar el libro.'); }
-}
-function clearReconcile(){ _reconcilePreview=null; if($('#tr-reconcile')) $('#tr-reconcile').replaceChildren(); }
-function canonicalQty(value){
-  const s=String(value??'').trim();
-  if(!/^\d+(?:\.\d+)?$/.test(s)) return null;
-  const [whole, frac='']=s.split('.');
-  return (whole.replace(/^0+(?=\d)/,'')||'0')+(frac.replace(/0+$/,'')?'.'+frac.replace(/0+$/,''):'');
-}
-async function previewReconcile(){
-  clearReconcile();
-  const output=$('#tr-reconcile'), ticker=$('#tr-ticker').value.trim().toUpperCase(), qty=$('#tr-confirmed-qty').value.trim();
-  if(!/^[A-Z][A-Z0-9]{0,9}(?:[.-][A-Z0-9]{1,5})?$/.test(ticker) ||
-     !$('#tr-complete').checked || !$('#tr-no-adjust').checked || !canonicalQty(qty) || canonicalQty(qty)==='0'){
-    output.textContent='Indica ticker y cantidad comprobada; confirma historial completo y ausencia de ajustes no modelados.'; return;
-  }
-  output.textContent='Calculando vista previa; la posición no se modifica…';
-  try{
-    const r=await api('/trades/'+encodeURIComponent(ticker)+'/reconcile',{
-      method:'POST',body:{complete_history:true,apply:false,confirmed_qty:qty}});
-    if(!$('#tr-reconcile') || $('#tr-ticker').value.trim().toUpperCase()!==ticker ||
-       $('#tr-confirmed-qty').value.trim()!==qty || !$('#tr-complete').checked || !$('#tr-no-adjust').checked) return;
-    const matches=r.reconciled===true && !!r.preview_token;
-    _reconcilePreview=matches?{ticker,qty,token:r.preview_token}:null;
-    output.innerHTML=`<div class="review-step"><h4>Vista previa, sin aplicar</h4>
-      <p class="sm review-output">Libro: <b>${esc(r.qty)} acciones</b> · Posición registrada: <b>${esc(r.position_qty)} acciones</b> · Comprobadas en Hapi: <b>${esc(qty)} acciones</b>.</p>
-      <p class="sm review-output">Invertido calculado: USD ${esc(r.invested)} · Costo promedio: USD ${esc(r.avg_cost)} por acción.</p>
-      <p class="alert">${esc(r.warning)}</p>
-      ${matches?`<p class="pill ok">El servidor concilió las cantidades (tolerancia de 0,00001 acción)</p>
-        <label class="review-check"><input id="tr-apply-check" type="checkbox">He comparado el costo previo con la vista previa y autorizo actualizar solo el costo de ${esc(ticker)}.</label>
-        <button type="button" onclick="applyReconcile()">Confirmar y aplicar costo</button>`:
-        '<div class="alert riesgo_elevado">Las cantidades no coinciden exactamente o falta la posición. No se puede aplicar. Revisa el libro, los splits y las transferencias.</div>'}</div>`;
-  }catch(e){ if($('#tr-reconcile')) output.textContent=reviewError(e,'No se pudo calcular la vista previa.'); }
-}
-async function applyReconcile(){
-  const preview=_reconcilePreview, output=$('#tr-reconcile');
-  if(!preview || !$('#tr-apply-check')?.checked || !$('#tr-complete').checked ||
-     $('#tr-ticker').value.trim().toUpperCase()!==preview.ticker || !$('#tr-no-adjust').checked ||
-     $('#tr-confirmed-qty').value.trim()!==preview.qty){ output.textContent='Repite la vista previa y confirma la conciliación antes de aplicar.'; return; }
-  if(!confirm(`¿Aplicar el costo calculado a ${preview.ticker}? Confirma que el libro está completo y las cantidades coinciden con Hapi.`)) return;
-  _reconcilePreview=null;
-  output.textContent='Aplicando costo confirmado…';
-  try{
-    const r=await api('/trades/'+encodeURIComponent(preview.ticker)+'/reconcile',{
-      method:'POST',body:{complete_history:true,no_unmodeled_adjustments:true,apply:true,
-        confirmed_qty:preview.qty,preview_token:preview.token}});
-    if($('#tr-reconcile')) output.textContent='Costo aplicado. La posición quedó pendiente de verificación otra vez. Revísala en Cartera; SQLite almacena números flotantes.';
-  }catch(e){ if($('#tr-reconcile')) output.textContent=reviewError(e,'No se pudo aplicar el costo.'); }
-}
+  // ---- Datos de demostracion (solo si no hay backend) ----
+  const initialAssets = [
+    {ticker:"VOO", name:"Vanguard S&P 500 ETF", shares:1.24, price:562.48, cost:584.20, color:"#276d5f", change:2.84, type:"ETF"},
+    {ticker:"NVDA", name:"NVIDIA Corporation", shares:1.55, price:138.42, cost:186.12, color:"#70a67c", change:15.31, type:"Acción"},
+    {ticker:"AAPL", name:"Apple Inc.", shares:0.46, price:240.75, cost:102.14, color:"#b7c5a9", change:7.81, type:"Acción"},
+  ];
+  const initialEntries = [
+    {id:1, ticker:"VOO", action:"Comprar", amount:100, thesis:"Seguir construyendo una base diversificada a largo plazo.", risk:"Caída general del mercado.", invalidation:"Cambio en mi horizonte de inversión.", date:"18 jun 2025"},
+    {id:2, ticker:"NVDA", action:"Mantener", amount:0, thesis:"La demanda de infraestructura de IA sostiene mi tesis.", risk:"Valuación exigente y concentración.", invalidation:"Desaceleración persistente de ingresos.", date:"12 jun 2025"},
+  ];
+  const radarUniverse = [
+    {ticker:"VOO", name:"Vanguard S&P 500 ETF", sector:"ETF · Mercado amplio", verdict:"Precio justo", verdictKey:"precio_justo", tone:"green", note:"Una base diversificada para mirar a largo plazo.", price:"$562.48"},
+    {ticker:"MSFT", name:"Microsoft Corporation", sector:"Tecnología · Software", verdict:"Buena pero cara", verdictKey:"buena_pero_cara", tone:"orange", note:"Negocio sólido; el precio merece una pausa.", price:"$478.04"},
+    {ticker:"AAPL", name:"Apple Inc.", sector:"Tecnología · Consumo", verdict:"Precio justo", verdictKey:"precio_justo", tone:"green", note:"Calidad reconocida, con crecimiento por vigilar.", price:"$239.37"},
+    {ticker:"NVDA", name:"NVIDIA Corporation", sector:"Tecnología · Chips", verdict:"Faltan datos", verdictKey:"faltan_datos", tone:"gray", note:"La tesis necesita actualizar supuestos.", price:"$138.42"},
+  ];
+  const PALETTE = ["#276d5f","#70a67c","#b7c5a9","#4d9062","#82bc90","#37674d","#5c8a6f","#a2b997"];
+  const ETF_TICKERS = new Set(["VOO","SPY","QQQ","IVV","VTI","VT","DIA","IWM","GLD","TLT","USO","BND","SCHD","VIG","VXUS","VEA","VWO","AGG","LQD","ARKK"]);
+  const VERDICT_LABELS = {barata_y_buena:"Barata y buena", precio_justo:"Precio justo", buena_pero_cara:"Buena pero cara", cuidado:"Cuidado", faltan_datos:"Faltan datos"};
+  const VERDICT_TONES = {barata_y_buena:"green", precio_justo:"green", buena_pero_cara:"orange", cuidado:"orange", faltan_datos:"gray"};
+  const FLOW_META = {
+    deposito:{label:"Depósito", icon:"plus", sign:1},
+    retiro:{label:"Retiro", icon:"arrowup", sign:-1},
+    dividendo:{label:"Dividendo", icon:"star", sign:1},
+    ahorro_soles:{label:"Ahorro en soles", icon:"wallet", sign:1},
+    actividad:{label:"Actividad en Hapi", icon:"check", sign:0},
+    w8ben:{label:"Formulario W-8BEN", icon:"shield", sign:0},
+  };
+  const FLOW_SOURCE = {texto:"contado por ti", captura:"desde captura", historial:"historial pegado"};
 
-/* ---------- 3. ¿Compro o vendo? (evaluación de una operación concreta) ---------- */
-let _tcCtx = null, _tcLast = null, _lunaOpinion = null;
-async function analisis(arg){
-  const [pf, cands] = await Promise.all([api('/portfolio'), api('/candidates')]);
-  const tk = (arg||'').trim().toUpperCase();
-  const tickers = [...new Set([...pf.positions.map(p=>p.ticker),
-    ...(cands.candidates||[]).map(c=>c.ticker)])];
-  _tcCtx = {positions: pf.positions, cash: pf.cash};
-  _tcLast = null; _lunaOpinion = null;
-  $('#view').innerHTML = `
-  <h2>¿Compro o vendo?</h2>
-  <p class="sub">Escribe la operación que estás pensando hacer en Hapi. Ves cómo queda tu cartera,
-    qué dicen tus límites y el motor, y Luna te da una segunda opinión.</p>
-  <div class="card"><div class="grid g3">
-    <div><label for="tc-tk">Ticker</label>
-      <input id="tc-tk" list="tc-tickers" value="${esc(tk)}" style="text-transform:uppercase">
-      <datalist id="tc-tickers">${tickers.map(t=>`<option value="${esc(t)}">`).join('')}</datalist></div>
-    <div><label>Operación</label><div class="row">
-      <label class="review-check"><input type="radio" name="tc-side" value="comprar" checked>Comprar</label>
-      <label class="review-check"><input type="radio" name="tc-side" value="vender">Vender</label></div></div>
-    <div><label for="tc-amt">Monto USD</label><input id="tc-amt" type="number" step="any" min="0"></div>
-  </div>
-  <div class="row sm" id="tc-shortcuts" style="margin-top:6px"></div>
-  <div class="row" style="margin-top:8px">
-    <button id="tc-go" type="button" onclick="tradeCheck()">Evaluar operación</button>
-    <span id="tc-status" class="sm mut" role="status"></span></div>
-  </div>
-  <div id="tc-out"></div>${DISC}`;
-  tcShortcuts();
-  $('#tc-tk').addEventListener('input', tcShortcuts);
-  document.querySelectorAll('input[name=tc-side]').forEach(r=>r.addEventListener('change', tcShortcuts));
-}
-function tcSetAmt(v){ const el=$('#tc-amt'); if(el) el.value=v; }
-function tcShortcuts(){
-  if(!_tcCtx) return;
-  const tk = $('#tc-tk')?.value.trim().toUpperCase()||'';
-  const pos = _tcCtx.positions.find(p=>p.ticker===tk);
-  const vr = document.querySelector('input[name=tc-side][value=vender]');
-  if(vr){
-    vr.disabled = !pos;
-    if(!pos && vr.checked) document.querySelector('input[name=tc-side][value=comprar]').checked = true;
+  // ---- Preferencias locales ----
+  const storageKey = "inversor-hapi-prefs-v1";
+  const readPreferences = () => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(storageKey) || "{}");
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch { return {}; }
+  };
+  const prefs = readPreferences();
+
+  // ---- Estado ----
+  const state = {
+    theme: ["light","dark"].includes(prefs.theme) ? prefs.theme : (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
+    private: prefs.private === true,
+    watched: new Set(Array.isArray(prefs.watched) ? prefs.watched.filter(t => typeof t === "string") : []),
+    route: "resumen",
+    menuOpen: false,
+    loading: true,
+    connected: false,
+    demoOverride: false,
+
+    filter: "todos", query: "", sort: "name",
+    walletTab: "posiciones",
+    pendingPrompt: "",
+    messages: [{role:"luna", text:"Hola, soy Luna. Estoy aquí para ayudarte a pensar con claridad sobre tu dinero.\n\nPuedo revisar tu cartera, tus números y tus decisiones. Nunca ejecuto operaciones ni invento cifras.\n\n¿Qué te gustaría revisar hoy?"}],
+    lunaTyping: false,
+
+    // Datos
+    assets: JSON.parse(JSON.stringify(initialAssets)),
+    entries: JSON.parse(JSON.stringify(initialEntries)),
+    radar: JSON.parse(JSON.stringify(radarUniverse)),
+    flows: [],
+    savings: 1240,
+    cash: 0,
+
+    // Datos del servidor
+    serverDashboard: null,
+    serverMarcador: null,
+    serverPulse: null,
+    serverRisk: null,
+    lastRef: "",
+
+    // Resumen
+    homeSavingText: "",
+    homeDraft: null,
+    homeReviewed: false,
+
+    // Cartera
+    portfolioSync: false,
+    portfolioFileName: "",
+    portfolioTicker: "",
+    portfolioShares: "",
+    portfolioPrice: "",
+    portfolioChecked: false,
+    portfolioReplace: false,
+    portfolioConfirmReplace: false,
+
+    // Análisis
+    analysisTicker: "VOO",
+    analysisSide: "Comprar",
+    analysisAmount: "100",
+    analysisShow: false,
+    analysisThesis: "",
+    analysisRisk: "",
+    analysisInvalidation: "",
+
+    // Movimientos
+    flowText: "",
+    flowDraft: null,
+    flowReviewed: false,
+    flowAllowDup: false,
+    flowBusy: false,
+
+    // Diario
+    journalTicker: "",
+    journalAction: "Comprar",
+    journalThesis: "",
+    journalRisk: "",
+    journalInvalidation: "",
+    journalReviewId: null,
+    journalLesson: "",
+
+    // Ajustes
+    settingsRisk: "moderado",
+    settingsLimit: "40",
+    settingsPositions: "3",
+    settingsSaved: false,
+  };
+
+  const savePreferences = () => {
+    try { localStorage.setItem(storageKey, JSON.stringify({theme:state.theme, private:state.private, watched:[...state.watched]})); return true; } catch { return false; }
+  };
+
+  const main = document.getElementById("main-content");
+  const dialog = document.getElementById("app-dialog");
+  const dialogBody = document.getElementById("dialog-body");
+  const sidebar = document.getElementById("sidebar");
+  const mobileQuery = matchMedia("(max-width: 1000px)");
+  let menuOpen = false;
+  let toastTimer;
+
+  function isDemoMode() {
+    const params = new URLSearchParams(location.search);
+    return state.demoOverride || params.get("mock") === "1" || params.get("demo") === "1" || location.protocol === "file:" || !state.connected;
   }
-  const side = document.querySelector('input[name=tc-side]:checked')?.value||'comprar';
-  let html = [50,100,200].map(v=>`<button type="button" class="mini sec" onclick="tcSetAmt(${v})">$ ${v}</button>`).join('');
-  if(side==='comprar' && _tcCtx.cash>=1)
-    html += `<button type="button" class="mini sec" onclick="tcSetAmt(${_tcCtx.cash})">Todo mi efectivo ($ ${fmt(_tcCtx.cash)})</button>`;
-  if(side==='vender' && pos && pos.market_value!=null)
-    html += `<button type="button" class="mini sec" onclick="tcSetAmt(${pos.market_value})">Toda la posición ($ ${fmt(pos.market_value)})</button>`;
-  const box = $('#tc-shortcuts'); if(box) box.innerHTML = html;
-}
-async function tradeCheck(assumptions){
-  const tk = ($('#tc-tk').value||'').trim().toUpperCase();
-  const side = document.querySelector('input[name=tc-side]:checked').value;
-  const amount = +$('#tc-amt').value;
-  const btn = $('#tc-go'), out = $('#tc-out');
-  if(!tk || !(amount>0)){ $('#tc-status').textContent='Escribe el ticker y un monto mayor a cero.'; return; }
-  btn.disabled = true; btn.textContent = 'Evaluando…'; $('#tc-status').textContent = '';
-  _lunaOpinion = null;
-  out.innerHTML = '<p class="mut">Evaluando la operación con precios de mercado…</p>';
-  try{
-    const r = await api('/trade_check',{method:'POST',body:{ticker:tk, side,
-      amount_usd:amount, assumptions:assumptions||null}});
-    _tcLast = r;
-    renderTradeCheck(r);
-  }catch(e){
-    out.innerHTML = `<div class="alert riesgo_elevado">${esc(reviewError(e,'No se pudo evaluar la operación.'))}</div>`;
-  }finally{ btn.disabled = false; btn.textContent = 'Evaluar operación'; }
-}
-function renderTradeCheck(r){
-  const pct = v => v==null?'—':fmt(v,2)+' %';
-  const limVal = l => l.valor==null?'—':(l.limite==='Reserva mínima de efectivo'?'$ '+fmt(l.valor):pct(l.valor));
-  const limMax = l => l.limite==='Reserva mínima de efectivo'?'$ '+fmt(l.maximo):pct(l.maximo);
-  $('#tc-out').innerHTML = `
-  <div class="card"><h3>${r.operacion==='comprar'?'Comprar':'Vender'} $ ${fmt(r.monto_usd)} de ${esc(r.ticker)}</h3>
-    <p class="sm">Precio: <b>$ ${fmt(r.precio.valor)}</b> <span class="mut">${esc(r.precio.fuente||'')} · ${esc(r.precio.asof||'')}</span>
-      · ≈ ${fmt(r.acciones_aprox,6)} acciones (fraccionadas)</p>
-    <div class="grid g2">
-      <div class="qbox"><b>Peso de ${esc(r.ticker)}</b><br>${pct(r.peso_antes_pct)} → ${pct(r.peso_despues_pct)}</div>
-      <div class="qbox"><b>Efectivo</b><br>$ ${fmt(r.efectivo_antes)} → $ ${fmt(r.efectivo_despues)}
-        ${r.deposito_necesario>0?`<br><span class="sm mut">tras depositar $ ${fmt(r.deposito_necesario)}</span>`:''}</div>
-    </div>
-    ${r.deposito_necesario>0?`<div class="alert riesgo_elevado">Te faltan $ ${fmt(r.deposito_necesario)} de efectivo: deposita en Hapi o reduce el monto.</div>`:''}
-    <table><tr><th>Límite</th><th>Quedaría en</th><th>Tu máximo</th><th></th></tr>
-      ${r.limites.map(l=>`<tr><td>${esc(l.limite)}</td><td>${limVal(l)}</td><td>${limMax(l)}</td>
-        <td class="${l.cumple?'pos':'neg'}">${l.cumple?'✓':'✗'}</td></tr>`).join('')}</table>
-    <p class="sm" style="margin-top:8px">El motor propone:
-      <span class="pill">${esc(r.motor.propuesta.replaceAll('_',' '))}</span>
-      <span class="pill ${r.motor.confianza==='baja'?'warn':'ok'}">confianza ${esc(r.motor.confianza)}</span></p>
-    <ul class="sm">${r.motor.argumentos.map(a=>`<li>${esc(a)}</li>`).join('')}</ul>
-    ${r.fundamentales_nota?`<p class="sm mut">Fundamentales: ${esc(r.fundamentales_nota)}</p>`:''}
-    <p class="sm mut">${esc(r.nota)}</p>
-    <div class="row">
-      <button class="sec" type="button" onclick="lunaOpinion(${r.decision_id})">Segunda opinión de Luna</button>
-      <button class="sec" type="button" onclick="tradeJournalForm(${r.decision_id})">Guardar en mi diario</button>
-    </div>
-    <p class="sm mut">Luna opina sobre esta evaluación; no decide ni opera por ti. La consulta al proveedor de IA puede generar costo.</p>
-    <div id="luna-op"></div>
-    <div id="tc-journal"></div>
-  </div>
-  <div class="card"><h3>Niveles de referencia</h3>
-    ${nivelesHtml(r.niveles, null)}
-    <p class="sm">Mercado hoy: ${r.mercado_hoy?`<span class="pill ${SEMAFORO_MKT[r.mercado_hoy.semaforo]||'mut'}">${esc((r.mercado_hoy.semaforo||'—').replaceAll('_',' '))}</span>
-      ${r.mercado_hoy.tipo_dia?` · día ${esc(r.mercado_hoy.tipo_dia)}`:''}<span class="mut"> — ${esc(r.mercado_hoy.lectura||'')}</span>`:'<span class="mut">sin datos de mercado ahora</span>'}</p>
-  </div>
-  <details class="card"><summary>Ver análisis completo</summary>
-    <div class="row sm" style="margin:8px 0">
-      <span class="sm mut">Supuestos DCF:</span>
-      <label class="sm" style="margin:0">crec. 1-5a %</label><input id="as-g" style="width:70px" value="15">
-      <label class="sm" style="margin:0">descuento %</label><input id="as-r" style="width:70px" value="10">
-      <label class="sm" style="margin:0">terminal %</label><input id="as-t" style="width:70px" value="2.5">
-      <button class="mini sec" type="button"
-        onclick="tradeCheck({growth_1_5_pct:+$('#as-g').value,discount_rate_pct:+$('#as-r').value,terminal_growth_pct:+$('#as-t').value})">Recalcular</button>
-      <button class="mini sec" type="button" onclick="fundForm('${esc(r.ticker)}')">Fundamentales…</button>
-    </div>
-    <div id="an-out"></div>
-  </details>`;
-  renderAnalysis(r.analisis);
-}
-async function lunaOpinion(did){
-  const out = $('#luna-op');
-  if(!out) return;
-  out.textContent = 'Consultando a Luna…';
-  try{
-    const r = await api(`/trade_check/${did}/luna`,{method:'POST'});
-    if($('#luna-op')!==out) return;
-    _lunaOpinion = r;
-    out.replaceChildren();
-    const box = document.createElement('div'); box.className = 'review-step';
-    const h = document.createElement('h4'); h.textContent = 'Segunda opinión de Luna'; box.appendChild(h);
-    const p = document.createElement('p'); p.className = 'sm'; p.textContent = r.resumen; box.appendChild(p);
-    const mk = (title,items)=>{
-      const s = document.createElement('div'); s.className = 'sm';
-      const b = document.createElement('b'); b.textContent = title; s.appendChild(b);
-      const ul = document.createElement('ul');
-      items.forEach(t=>{ const li = document.createElement('li'); li.textContent = t; ul.appendChild(li); });
-      s.appendChild(ul); return s;
-    };
-    box.appendChild(mk('A favor', r.a_favor));
-    box.appendChild(mk('En contra', r.en_contra));
-    box.appendChild(mk('Qué vigilar', r.vigilar));
-    const meta = document.createElement('p'); meta.className = 'sm mut';
-    meta.textContent = `Modelo: ${r.model}. Opinión sobre los datos ya evaluados; no es una orden.`; box.appendChild(meta);
-    out.appendChild(box);
-  }catch(e){ if($('#luna-op')===out) out.textContent = reviewError(e,'No se pudo obtener la opinión de Luna.'); }
-}
-function tradeJournalForm(did){
-  const r = _tcLast, j = $('#tc-journal');
-  if(!r || !j) return;
-  const pos = (_tcCtx?.positions||[]).find(p=>p.ticker===r.ticker);
-  let action, choice;
-  if(r.operacion==='comprar'){
-    action = pos ? 'agregar' : 'comprar';
-    choice = pos ? 'agregar_gradualmente' : 'comprar';
-  }else{
-    const full = pos && r.monto_usd >= (pos.market_value||0) - 0.01;
-    action = full ? 'vender' : 'reducir';
-    choice = full ? 'vender' : 'reducir';
-  }
-  const rev = new Date(Date.now()+90*864e5).toISOString().slice(0,10);
-  // Textos prellenados solo con cifras del resultado (editables; nada se inventa).
-  const n = r.niveles, mh = r.mercado_hoy;
-  let tesis = `${r.operacion==='comprar'?'Comprar':'Vender'} $${fmt(r.monto_usd)} de ${r.ticker} a $${fmt(r.precio.valor)} (${(r.fecha||'').slice(0,10)}). `
-    + `Motor: ${r.motor.propuesta.replaceAll('_',' ')} (confianza ${r.motor.confianza}).`;
-  if(mh && mh.semaforo && mh.semaforo!=='sin_datos') tesis += ` Mercado: ${mh.semaforo.replaceAll('_',' ')}${mh.tipo_dia?`, día ${mh.tipo_dia}`:''}.`;
-  if(n) tesis += ` Semáforo de la acción: ${n.semaforo}.`;
-  const limVal = l => l.valor==null?'—':(l.limite==='Reserva mínima de efectivo'?'$'+fmt(l.valor):fmt(l.valor,1)+'%');
-  const limMax = l => l.limite==='Reserva mínima de efectivo'?'$'+fmt(l.maximo):fmt(l.maximo,1)+'%';
-  const fallan = (r.limites||[]).filter(l=>!l.cumple);
-  let riesgos = (_lunaOpinion?.en_contra||[]).join('; ');
-  if(!riesgos){
-    const partes = [];
-    if(fallan.length) partes.push('Incumple: '+fallan.map(l=>`${l.limite} (${limVal(l)} ${l.limite==='Reserva mínima de efectivo'?'<':'>'} ${limMax(l)})`).join('; '));
-    if(r.tecnica?.volatilidad_anualizada_pct!=null) partes.push(`Volatilidad anual ${fmt(r.tecnica.volatilidad_anualizada_pct,1)}%`);
-    riesgos = partes.join('. ');
-  }
-  const inval = n ? `Cierre diario por debajo de $${fmt(n.stop_loss)} (stop sugerido, ${pctS(n.stop_loss_pct).replace(' ','')}) o cambio en la tesis.`
-                  : 'Cambio en la tesis o incumplimiento de mis límites.';
-  j.innerHTML = `<div class="review-step"><h4>Guardar en mi diario</h4>
-    <p class="sm mut">Textos prellenados con las cifras de esta evaluación; edítalos antes de registrar.</p>
-    <div class="grid g2">
-      <div><label for="tj-tesis">Tesis *</label><textarea id="tj-tesis" placeholder="¿Por qué haces esta operación?">${esc(tesis)}</textarea></div>
-      <div><label for="tj-riesgos">Riesgos *</label><textarea id="tj-riesgos" placeholder="¿Qué puede salir mal?">${esc(riesgos)}</textarea></div>
-      <div><label for="tj-inv">Condición de invalidación *</label><textarea id="tj-inv" placeholder="¿Qué tendría que pasar para que cambies de opinión?">${esc(inval)}</textarea></div>
-      <div><label for="tj-rev">Revisar el</label><input id="tj-rev" type="date" value="${rev}">
-        <label for="tj-precio">Precio</label><input id="tj-precio" type="number" step="any" value="${r.precio.valor}"></div>
-    </div>
-    <p class="sm mut">Se registrará como «${esc(action)}». La ejecución la haces tú en Hapi.</p>
-    <button type="button" id="tj-save" onclick="saveTradeJournal(${did},'${action}','${choice}')">Registrar en el diario</button>
-    <span id="tj-status" class="sm mut" role="status"></span></div>`;
-}
-async function saveTradeJournal(did, action, choice){
-  const st = $('#tj-status'), btn = $('#tj-save');
-  if(!st) return;
-  if(btn) btn.disabled = true;
-  const p = $('#tj-precio').value;
-  try{
-    await api('/journal',{method:'POST',body:{ticker:_tcLast.ticker, action,
-      tesis:$('#tj-tesis').value, riesgos:$('#tj-riesgos').value,
-      condicion_invalidacion:$('#tj-inv').value,
-      precio:p===''?null:+p, review_date:$('#tj-rev').value}});
-    await api(`/decisions/${did}/record`,{method:'POST',body:{choice, authorized:true}});
-    st.textContent = 'Guardado en tu diario. Si decides operar, hazlo en Hapi y luego sincroniza tu cartera con una foto.';
-  }catch(e){ st.textContent = reviewError(e,'No se pudo guardar.'); if(btn) btn.disabled = false; }
-}
-function renderAnalysis(r){
-  const d = r.decision, sc = r.valoracion.escenarios, tec = r.situacion_tecnica||{};
-  const scoreRow = Object.entries(r.analisis_fundamental.scores||{}).map(([k,v])=>
-    `<tr><td>${k.replaceAll('_',' ')}</td><td>${v.score==null?'<span class="pill warn">falta dato</span>':`<b>${v.score}</b>/10`}</td><td class="sm mut">${esc(v.reason)}</td></tr>`).join('');
-  $('#an-out').innerHTML = `
-  <div class="card"><h3>${r.ticker} — ${esc(r.empresa)} <span class="sm mut">(${r.fecha_hora.replace('T',' ')})</span></h3>
-    <div class="row sm">
-      <span>Precio: <b>$ ${fmt(r.precio_actual.valor)}</b> <span class="pill ${r.precio_actual.estado==='actual'?'ok':'warn'}">${esc(r.precio_actual.estado)}</span>
-      <span class="mut">${esc(r.precio_actual.fuente||'')} ${esc(r.precio_actual.asof||'')}</span></span>
-      <span>· Cantidad ${r.cantidad} · Valor $ ${fmt(r.valor_total)} · Costo prom. $ ${fmt(r.costo_promedio)}
-      · Resultado <span class="${cls(r.resultado)}">$ ${fmt(r.resultado)}</span> · Peso ${fmt(r.peso_en_cartera_pct,1)} %</span>
-    </div></div>
-  <div class="card" style="border-left:5px solid var(--acc)">
-    <h3>Decisión propuesta: <span class="pill">${esc(d.decision_propuesta.replaceAll('_',' '))}</span>
-     <span class="pill ${d.nivel_confianza==='baja'?'warn':'ok'}">confianza ${d.nivel_confianza}</span></h3>
-    <p class="sm"><b>Pregunta obligatoria:</b> ${esc(d.pregunta_obligatoria)}</p>
-    <ul class="sm">${d.argumentos.map(a=>`<li>${esc(a)}</li>`).join('')}</ul>
-    <p class="sm mut" style="margin-top:6px">${esc(d.nota)} Próxima revisión: ${esc(r.proxima_revision)}.</p>
-    <button class="mini sec" type="button" onclick="explainDecision(${r.decision_id})">Explicar esta propuesta con Luna</button>
-    <p class="sm mut">Luna pone en palabras la propuesta ya guardada; no produce otra recomendación. La consulta al proveedor de IA puede generar costo.</p>
-    <div id="explain-${r.decision_id}" class="assistant-answer sm" role="status"></div></div>
-  ${d.checklist_promediar?`<div class="card"><h3>Checklist antes de promediar a la baja</h3>
-    ${d.checklist_promediar.map(c=>`<div class="qbox"><b>${esc(c.pregunta)}</b><br>${esc(c.respuesta)}</div>`).join('')}</div>`:''}
-  <div class="grid g2">
-  <div class="card"><h3>Alternativas comparadas</h3>
-    ${Object.entries(d.alternativas).filter(([k,v])=>v.a_favor.length||v.en_contra.length||v.condiciones.length).map(([k,v])=>`
-      <details><summary>${k.replaceAll('_',' ')}</summary>
-      ${v.a_favor.map(x=>`<div class="sm">✅ ${esc(x)}</div>`).join('')}
-      ${v.en_contra.map(x=>`<div class="sm">❌ ${esc(x)}</div>`).join('')}
-      ${v.condiciones.map(x=>`<div class="sm">📌 ${esc(x)}</div>`).join('')}</details>`).join('')}</div>
-  <div class="card"><h3>Valoración por escenarios (DCF)</h3>
-    ${r.valoracion.calculable? `<table><tr><th>Escenario</th><th>Valor/acción</th><th>Margen seg.</th></tr>
-      ${Object.entries(sc).map(([k,v])=>`<tr><td>${k}</td><td>$ ${fmt(v.valor_estimado_por_accion)}</td>
-        <td class="${cls(v.margen_de_seguridad_pct)}">${fmt(v.margen_de_seguridad_pct,1)} %</td></tr>`).join('')}</table>
-      <details><summary class="sm">Supuestos del escenario base (modificables arriba)</summary>
-      <pre>${esc(JSON.stringify(sc.base.supuestos,null,1))}</pre></details>`
-     :`<p class="sm warn">No calculable: ${r.valoracion.faltantes.map(esc).join('; ')}.</p>`}
-    <p class="sm mut">${esc(r.valoracion.nota)}</p>
-    <h3>Múltiplos</h3>
-    ${Object.keys(r.multiplos.multiples).length?`<table>${Object.entries(r.multiplos.multiples).map(([k,v])=>`<tr><td>${k}</td><td><b>${v}</b></td></tr>`).join('')}</table>`:''}
-    ${r.multiplos.missing.length?`<p class="sm mut">Faltan: ${r.multiplos.missing.map(esc).join('; ')}</p>`:''}
-  </div></div>
-  <div class="grid g2">
-  <div class="card"><h3>Análisis fundamental</h3><table>${scoreRow}</table>
-    <p class="sm mut">${esc(r.analisis_fundamental.nota||'')}</p>
-    <p class="sm">Fuente de fundamentales: ${esc(r.calidad_de_datos.fundamentales_fuente||'no registrados')} ${r.calidad_de_datos.fundamentales_asof?`(${esc(r.calidad_de_datos.fundamentales_asof)})`:''}</p></div>
-  <div class="card"><h3>Situación técnica (complementaria)</h3>
-    ${tec.error?`<p class="sm warn">${esc(tec.error)}</p>`:`
-    <table>
-      <tr><td>Tendencia</td><td><b>${esc(tec.tendencia||'—')}</b></td></tr>
-      <tr><td>SMA50 / SMA200</td><td>${fmt(tec.sma50)} / ${fmt(tec.sma200)}</td></tr>
-      <tr><td>RSI(14)</td><td>${tec.rsi14??'—'}</td></tr>
-      <tr><td>Distancia al máx. del periodo</td><td>${fmt(tec.distancia_a_maximo_pct,1)} %</td></tr>
-      <tr><td>Volatilidad anualizada</td><td>${fmt(tec.volatilidad_anualizada_pct,1)} %</td></tr>
-      <tr><td>Caída máx. del periodo</td><td>${fmt(tec.caida_maxima_periodo_pct,1)} %</td></tr>
-      <tr><td>Soporte / resistencia aprox.</td><td>${fmt(tec.soporte_aproximado)} / ${fmt(tec.resistencia_aproximada)}</td></tr>
-    </table><p class="sm mut">${esc(tec.nota||'')} Fuente: ${esc(tec.fuente||'')}</p>`}</div>
-  </div>`;
-}
-async function explainDecision(id){
-  const output=$('#explain-'+id);
-  if(!output) return;
-  output.textContent='Consultando a Luna sobre la propuesta guardada…';
-  try{
-    const result=await api(`/decisions/${id}/explain`,{method:'POST'});
-    if($('#explain-'+id)===output) output.textContent=`${result.explanation}\nModelo: ${result.model}. Explicación de una propuesta existente; no es una nueva decisión.`;
-  }catch(e){ if($('#explain-'+id)===output) output.textContent=reviewError(e,'No se pudo explicar la propuesta.'); }
-}
-let _fundPhotoContext=null, _fundPhotoVersion=0;
-async function fundForm(tk){
-  const f = await api('/fundamentals/'+tk);
-  const cur = f.fundamentals;
-  _fundPhotoContext={ticker:tk,fields:f.fields,existing:Object.keys(cur).length>0,source:f.source,period:f.period};
-  $('#an-out').innerHTML = `
-  <div class="card"><h3>Fundamentales de ${esc(tk)}</h3>
-  <p class="sub">Ingresa datos anuales o TTM de un informe verificable. No mezcles cifras trimestrales con anuales para el DCF. Fuente y fecha obligatorias; sin datos el sistema no inventa nada.</p>
-  <div class="row"><button class="sec" type="button" onclick="secFund('${esc(tk)}')">Cargar desde la SEC (10-K oficial)</button>
-    <span id="sec-status" class="sm mut" role="status"></span></div>
-  <div class="review-step"><h4>Extraer un informe por foto</h4>
-    <p class="sm mut">Una captura legible de un informe puede aportar cifras sin escalarlas. El modelo de IA puede generar costo y devolver campos vacíos. Comprueba período, fecha de cierre y escalas de dinero y acciones en el informe; un trimestre aislado no se guarda como anual.</p>
-    <div class="row"><input id="fp-file" type="file" accept="image/*" style="max-width:320px" onchange="fundPhotoChanged()">
-      <button id="fp-analyze" type="button" onclick="fundPhotoAnalyze()">Analizar informe</button>
-      <span id="fp-status" class="sm mut" role="status"></span></div>
-    <div id="fp-review"></div>
-  </div>
-  <h3>Registro manual</h3>
-  <div class="grid g3">
-  ${f.fields.map(([k,label])=>`<div><label>${esc(label)}</label><input id="f-${k}" value="${esc(cur[k]??'')}"></div>`).join('')}
-  </div>
-  <div class="grid g2" style="margin-top:8px">
-    <div><label>Fuente (obligatoria)</label><input id="f-source" value="${esc(f.source||'')}" placeholder="p. ej. informe 10-K FY2026, ir.nvidia.com"></div>
-    <div><label>Fecha del dato (obligatoria)</label><input id="f-asof" value="${esc(f.asof||'')}" placeholder="2026-05-28"></div>
-  </div>
-  <button style="margin-top:10px" onclick="saveFund('${tk}',${JSON.stringify(f.fields.map(x=>x[0]))
-    .replaceAll('"',"'")})">Guardar fundamentales</button></div>`;
-}
-async function secFund(tk){
-  const st = $('#sec-status');
-  if(st) st.textContent = 'Descargando el 10-K de la SEC…';
-  let r;
-  try{
-    try{
-      r = await api(`/fundamentals/${encodeURIComponent(tk)}/sec`,{method:'POST',body:{}});
-    }catch(e){
-      if(e._status===409 && confirm(e.detail+'\n\n¿Reemplazar los datos actuales por los del 10-K?'))
-        r = await api(`/fundamentals/${encodeURIComponent(tk)}/sec`,{method:'POST',body:{replace_existing:true}});
-      else throw e;
+
+  // ---- Helpers de marcado ----
+  const privateText = (text, classes = "") => `<span class="num ${classes}" data-private data-value="${escapeHtml(text)}">${escapeHtml(state.private ? "••••" : text)}</span>`;
+  const badge = (text, tone = "") => `<span class="badge ${tone ? "badge-" + tone : "badge-muted"}">${text}</span>`;
+  const routeLabels = {resumen:"Resumen", cartera:"Mi cartera", analisis:"¿Compro o vendo?", explorar:"Explorar", asistente:"Hapi IA", movimientos:"Movimientos", diario:"Mi diario", ajustes:"Ajustes"};
+  const portfolio = () => state.assets.reduce((s,a) => s + a.shares * a.price, 0);
+  const investedTotal = portfolio;
+  const costBasis = () => state.assets.reduce((s,a) => s + a.cost, 0);
+  const assetType = (ticker, sector = "") => (sector.startsWith("ETF") || ETF_TICKERS.has(ticker)) ? "ETF" : "Acción";
+  const monoTone = (ticker, type) => type === "ETF" ? "purple" : (ticker.charCodeAt(0) % 3 === 1 ? "blue" : "");
+  const monogram = (letter, tone = "") => `<span class="asset-monogram ${tone}" aria-hidden="true">${escapeHtml(letter)}</span>`;
+  const assetLabel = (ticker, name, tone = "") => `<span class="asset">${monogram(ticker[0] || "?", tone)}<span><span class="asset-name">${escapeHtml(ticker)}</span><span class="asset-sub" style="display:block">${escapeHtml(name)}</span></span></span>`;
+  const watchButton = ticker => `<button class="icon-btn watch-btn" data-action="watch" data-ticker="${escapeHtml(ticker)}" aria-pressed="${state.watched.has(ticker)}" aria-label="${state.watched.has(ticker) ? "Quitar" : "Añadir"} ${escapeHtml(ticker)} ${state.watched.has(ticker) ? "de" : "a"} seguimiento" title="Seguimiento">${icon("star")}</button>`;
+  const footer = () => `<footer class="footer"><p>Hapi IA ayuda a pensar mejor; no decide por ti ni ejecuta operaciones. No es asesoría financiera.</p><button data-action="about">Alcance y origen de datos ${icon("external","icon-sm")}</button></footer>`;
+  const intro = (eyebrow, title, description, actions = "") => `<section class="page-intro"><div><p class="eyebrow">${eyebrow}</p><h1 id="page-title">${title}</h1><p class="description">${description}</p></div>${actions ? `<div class="intro-actions">${actions}</div>` : ""}</section>`;
+  const advanced = (title, childrenHtml) => `<details class="advanced"><summary>${title} ${icon("chevdown")}</summary><div class="advanced-body">${childrenHtml}</div></details>`;
+
+  // ---- Comunicación con FastAPI ----
+  async function loadServerData() {
+    try {
+      const [dashRes, marcRes, pulseRes, radarRes, jourRes, setRes, profRes, flowsRes] = await Promise.all([
+        fetch("/api/dashboard").catch(() => null),
+        fetch("/api/marcador").catch(() => null),
+        fetch("/api/market/pulse").catch(() => null),
+        fetch("/api/radar").catch(() => null),
+        fetch("/api/journal").catch(() => null),
+        fetch("/api/settings").catch(() => null),
+        fetch("/api/profile").catch(() => null),
+        fetch("/api/flows").catch(() => null),
+      ]);
+
+      if (dashRes && dashRes.ok) {
+        state.serverDashboard = await dashRes.json();
+        state.connected = true;
+      }
+      if (marcRes && marcRes.ok) state.serverMarcador = await marcRes.json();
+      if (pulseRes && pulseRes.ok) state.serverPulse = await pulseRes.json();
+      if (radarRes && radarRes.ok) {
+        const rData = await radarRes.json();
+        if (rData && Array.isArray(rData.items) && rData.items.length) {
+          state.radar = rData.items.map(it => ({
+            ticker: it.ticker,
+            name: (it.fund && it.fund.data && it.fund.data.company_name) || it.ticker,
+            sector: it.sector || "Sin clasificar",
+            verdict: VERDICT_LABELS[it.veredicto] || "Analizar",
+            verdictKey: it.veredicto || "faltan_datos",
+            tone: VERDICT_TONES[it.veredicto] || "gray",
+            note: (it.motivos || []).join(" · ") || "En seguimiento.",
+            price: it.price && it.price.price != null ? "$" + Number(it.price.price).toFixed(2) : "Sin dato",
+          }));
+        }
+      }
+      if (jourRes && jourRes.ok) {
+        const jData = await jourRes.json();
+        if (jData && Array.isArray(jData.entries)) {
+          state.entries = jData.entries.map(e => ({
+            id: e.id,
+            ticker: e.ticker,
+            action: e.action ? e.action[0].toUpperCase() + e.action.slice(1) : "Comprar",
+            amount: (e.data && e.data.precio) || 0,
+            thesis: (e.data && e.data.tesis) || "",
+            risk: (e.data && e.data.riesgos) || "",
+            invalidation: (e.data && e.data.condicion_invalidacion) || "",
+            date: e.created_at ? e.created_at.slice(0, 10) : "Hoy",
+            lesson: (e.evaluation && e.evaluation.leccion) || "",
+          }));
+        }
+      }
+      if (setRes && setRes.ok) {
+        const sData = await setRes.json();
+        if (sData && sData.limits && sData.limits.max_position_pct != null) {
+          state.settingsLimit = String(sData.limits.max_position_pct);
+        }
+      }
+      if (profRes && profRes.ok) {
+        const pData = await profRes.json();
+        if (pData && pData.profile && pData.profile.nivel_riesgo) {
+          state.settingsRisk = pData.profile.nivel_riesgo;
+        }
+      }
+      if (flowsRes && flowsRes.ok) {
+        const fData = await flowsRes.json();
+        if (fData && Array.isArray(fData.rows)) state.flows = fData.rows;
+      }
+
+      // Mapear cartera real si existe
+      if (state.serverDashboard && state.serverDashboard.portfolio) {
+        const pf = state.serverDashboard.portfolio;
+        state.serverRisk = state.serverDashboard.risk || null;
+        state.cash = typeof pf.cash === "number" ? pf.cash : 0;
+        if (Array.isArray(pf.positions)) {
+          state.assets = pf.positions.map((p, i) => {
+            const basis = p.price_info || {};
+            const price = Number(basis.precio_usado)
+              || (p.market_value != null && p.qty ? p.market_value / p.qty : 0)
+              || 0;
+            return {
+              ticker: p.ticker,
+              name: p.name || p.ticker,
+              shares: Number(p.qty) || 0,
+              price,
+              cost: Number(p.invested) || 0,
+              color: PALETTE[i % PALETTE.length],
+              change: Number(p.return_pct) || 0,
+              priceStatus: p.price_status || "",
+              priceFuente: basis.fuente || "",
+              priceAsof: basis.asof || "",
+              verified: !!p.verified,
+              type: assetType(p.ticker),
+            };
+          });
+        }
+      }
+
+      // Mapear alcancia real
+      if (state.serverMarcador && state.serverMarcador.alcancia) {
+        const alc = state.serverMarcador.alcancia;
+        if (typeof alc.progreso === "number") state.savings = alc.progreso;
+      }
+      const fuentes = state.serverMarcador && state.serverMarcador.fuentes;
+      if (fuentes && fuentes.valor_actual && fuentes.valor_actual.fecha) {
+        state.lastRef = fuentes.valor_actual.fecha
+          + (fuentes.valor_actual.fuente ? " · " + fuentes.valor_actual.fuente : "");
+      }
+    } catch (err) {
+      console.warn("Conexión local a FastAPI:", err);
+    } finally {
+      state.loading = false;
+      applyModeBadge();
+      renderRoute();
     }
-  }catch(e){
-    if(st) st.textContent = reviewError(e,'No se pudieron cargar los fundamentales de la SEC.');
-    return;
   }
-  await fundForm(tk);
-  alert('Fundamentales cargados desde la SEC.\nFuente: '+r.source
-    +'\nCampos faltantes: '+((r.missing||[]).join(', ')||'ninguno'));
-}
-function fundPhotoChanged(){
-  _fundPhotoVersion++;
-  if($('#fp-review')) $('#fp-review').replaceChildren();
-  if($('#fp-status')) $('#fp-status').textContent=$('#fp-file').files[0] ? `Listo para analizar: ${$('#fp-file').files[0].name}` : '';
-}
-async function fundPhotoAnalyze(){
-  const file=$('#fp-file')?.files[0], button=$('#fp-analyze'), ctx=_fundPhotoContext;
-  if(!file || !file.type.startsWith('image/')){ $('#fp-status').textContent='Selecciona una imagen de un informe.'; return; }
-  const version=++_fundPhotoVersion;
-  $('#fp-review').replaceChildren(); button.disabled=true;
-  $('#fp-status').textContent='Extrayendo datos con el proveedor de IA…';
-  try{
-    const image_b64=imagePayload(await photoShrink(file));
-    const r=await api('/fundamentals/photo/analyze',{method:'POST',body:{image_b64,mime:'image/jpeg'}});
-    if(!$('#fp-review') || _fundPhotoContext!==ctx || version!==_fundPhotoVersion || $('#fp-file').files[0]!==file) return;
-    $('#fp-status').textContent=`Borrador extraído · modelo: ${r.model}`;
-    const units=['USD','miles USD','millones USD','miles de millones USD'];
-    const shares=['acciones','miles acciones','millones acciones','miles de millones acciones'];
-    const options=(values,selected)=>'<option value="">Selecciona tras verificar el informe</option>'+values.map(v=>`<option value="${esc(v)}" ${v===selected?'selected':''}>${esc(v)}</option>`).join('');
-    $('#fp-review').innerHTML=`<div class="review-step"><h4>Borrador sin guardar</h4>
-      <p class="sm mut">Las cifras monetarias se transcriben sin escalar y se convertirán a USD al guardar. Acciones tienen escala independiente; EPS es USD por acción y no se escala. Un campo vacío significa que no se vio.</p>
-      ${r.warnings.length?`<div class="alert"><b>Advertencias de extracción</b><ul>${r.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div>`:''}
-      <table class="review-table"><tr><th>Dato del informe</th><th>Valor visible / corregido</th></tr>
-      ${ctx.fields.map(([key,label])=>`<tr><td><label for="fp-${key}">${esc(label)}</label></td>
-        <td>${['moat','key_risks','business_model','customer_concentration'].includes(key)
-          ?`<textarea id="fp-${key}" maxlength="500">${esc(r.data[key]??'')}</textarea>`
-          :`<input id="fp-${key}" ${key==='next_earnings_date'?'type="date"':'inputmode="decimal"'} value="${esc(r.data[key]??'')}">`}</td></tr>`).join('')}</table>
-      <div class="grid g2">
-        <div><label for="fp-source">Fuente exacta del informe (obligatoria)</label><input id="fp-source" placeholder="Título del informe y emisor"></div>
-        <div><label for="fp-asof">Fecha de cierre del informe (obligatoria)</label><input id="fp-asof" type="date" value="${esc(r.report_asof??'')}"></div>
-        <div><label for="fp-period">Período de las cifras (anual o TTM)</label><select id="fp-period">${options(['anual','TTM'],r.period)}</select>
-          ${r.period==='trimestral'?'<p class="alert">Informe trimestral: no se guarda como anual ni TTM. Usa un informe anual o TTM verificable.</p>':''}</div>
-        <div><label for="fp-unit">Escala de importes (ingresos, FCF, deuda, caja, EBITDA, recompras)</label><select id="fp-unit">${options(units,r.unit)}</select></div>
-        <div><label for="fp-shares-unit">Escala independiente de acciones en circulación</label><select id="fp-shares-unit">${options(shares,r.shares_unit)}</select></div>
+
+  function applyModeBadge() {
+    const demo = isDemoMode();
+    const btn = document.querySelector(".top-demo");
+    const long = document.getElementById("mode-label");
+    const short = document.getElementById("mode-label-short");
+    if (long) long.textContent = demo ? "Modo demostración" : "Datos locales";
+    if (short) short.textContent = demo ? "Demo" : "Local";
+    if (btn) btn.classList.toggle("connected", !demo);
+  }
+
+  // ======================= VISTAS =======================
+
+  // ---- Resumen ----
+  function renderResumen() {
+    const invested = investedTotal();
+    const isDemo = isDemoMode();
+    const hoy = new Date().toLocaleDateString("es-PE", {weekday:"long", day:"numeric", month:"long", year:"numeric"}).toUpperCase();
+
+    let netDeposits = null, fxCost = null, fxLabel = "ESTIMACIÓN", pocketOut = null, result = null, spyDiff = null;
+    const m = state.serverMarcador && state.serverMarcador.marcador;
+    if (m) {
+      netDeposits = m.depositado_neto;
+      fxCost = m.costos_deposito;
+      if (m.costos_etiqueta) fxLabel = m.costos_etiqueta;
+      pocketOut = m.puesto_bolsillo;
+      if (typeof m.resultado_real === "number") result = m.resultado_real;
+    }
+    const fant = state.serverMarcador && state.serverMarcador.fantasma;
+    if (fant && typeof fant.diferencia === "number" && fant.valor_fantasma) {
+      spyDiff = (fant.diferencia / fant.valor_fantasma) * 100;
+    }
+    if (isDemo) {
+      if (netDeposits == null) netDeposits = 1000;
+      if (fxCost == null) fxCost = 13.60;
+      if (pocketOut == null) pocketOut = 986.40;
+      if (result == null) result = invested - pocketOut;
+      if (spyDiff == null) spyDiff = 3.8;
+    } else if (result == null && pocketOut != null) {
+      result = invested - pocketOut;
+    }
+
+    const alc = (state.serverMarcador && state.serverMarcador.alcancia) || {};
+    const goalPractical = alc.meta_soles || (isDemo ? 2000 : 0);
+    const goalOptimal = alc.optimo_soles || (isDemo ? 3000 : 0);
+
+    const spyInst = state.serverPulse && Array.isArray(state.serverPulse.instrumentos)
+      ? state.serverPulse.instrumentos.find(i => i.ticker === "SPY") : null;
+    const rk = state.serverRisk || (state.serverDashboard && state.serverDashboard.risk) || null;
+    const spyVal = spyInst && spyInst.price != null
+      ? Number(spyInst.price).toLocaleString("en-US", {minimumFractionDigits:2})
+      : (isDemo ? "5,983.32" : "Sin dato");
+    const spyChg = spyInst && spyInst.day_change_pct != null
+      ? `${spyInst.day_change_pct >= 0 ? "+" : ""}${Number(spyInst.day_change_pct).toFixed(2)}%`
+      : (isDemo ? "+0.48%" : "—");
+    const hhiVal = rk && rk.hhi != null ? String(rk.hhi) : (isDemo ? "0.51" : "Sin dato");
+    const divVal = rk && rk.diversificacion_efectiva != null
+      ? `${rk.diversificacion_efectiva} activos` : (isDemo ? "2.0 activos" : "Sin dato");
+    const moneyOrNA = v => (v == null ? "Sin dato" : privateText(money(v)));
+
+    const snapshotRows = state.assets.map(a => {
+      const value = round(a.shares * a.price);
+      return `<li><button class="snapshot-row" data-action="asset" data-ticker="${escapeHtml(a.ticker)}"><span class="sr-only">Ver detalle de </span>${assetLabel(a.ticker, a.name, monoTone(a.ticker, a.type || assetType(a.ticker)))}<span class="snapshot-value">${privateText(money(value))}<span class="cell-sub">${(value / (invested || 1) * 100).toFixed(1)}% de lo invertido</span></span>${icon("chevron","snapshot-chevron")}</button></li>`;
+    }).join("");
+
+    main.innerHTML = intro(
+      `HOY · ${hoy}`,
+      "Buenos días.",
+      "Una mirada clara a tu dinero. Sin ruido, sin prisa.",
+      `<button class="btn" data-action="export">${icon("download")}Exportar</button><a class="btn btn-primary" href="#analisis">Analizar una decisión ${icon("arrow")}</a>`
+    ) + `
+      <div class="overview-grid">
+        <section class="card balance-card" aria-label="Resumen de la cartera">
+          <div class="balance-top"><p class="balance-label">Tu cartera vale hoy</p><button class="icon-btn" data-action="privacy" id="privacy-button" aria-pressed="${state.private}" aria-label="${state.private ? "Mostrar" : "Ocultar"} importes">${icon(state.private ? "eyeoff" : "eye")}</button></div>
+          <div class="balance-amount">${privateText(money(invested))}</div>
+          <div class="balance-return">${result != null ? `<span class="badge ${result >= 0 ? "badge-green" : "badge-red"}">${icon("trend","icon-sm")}${privateText((result >= 0 ? "+" : "−") + money(Math.abs(result)), result >= 0 ? "positive" : "negative")}</span><span class="small muted">${result >= 0 ? "por encima" : "por debajo"} de lo que salió de tu bolsillo</span>` : `<span class="badge badge-muted">Sin dato aún</span><span class="small muted">falta el valor actual o tu marcador</span>`}</div>
+          <dl class="balance-stats"><div><dt>Cartera + efectivo</dt><dd>${privateText(money(invested + state.cash))}</dd></div><div><dt>Disponible</dt><dd>${privateText(money(state.cash))}</dd></div></dl>
+          <section class="snapshot" aria-labelledby="snapshot-heading"><div class="snapshot-head"><h2 id="snapshot-heading">Tus posiciones</h2><a class="btn btn-plain" href="#cartera">Ver cartera ${icon("external","icon-sm")}</a></div><ul class="snapshot-list">${snapshotRows || `<li class="small muted" style="padding:16px 0">Aún no hay posiciones registradas.</li>`}</ul></section>
+          <div class="snapshot-foot"><p>${isDemo ? "Escenario ilustrativo · datos de ejemplo" : `Última referencia: ${escapeHtml(state.lastRef || "Sin dato")}`}</p><button class="btn btn-plain" data-action="about">Origen de datos ${icon("external","icon-sm")}</button></div>
+        </section>
+        <aside class="insight-stack" aria-label="Aprender con contexto">
+          <section class="ai-card"><div><p class="ai-kicker">${icon("sparkles")}LUNA · TU COMPAÑERA</p><h2>Detrás de cada número,<br>una buena pregunta.</h2><p>Entiende tu exposición y los conceptos antes de pensar en tu próxima decisión.</p></div><div><button class="btn" data-action="goto" data-route="asistente">Conversar con Luna ${icon("arrow")}</button><p class="ai-disclaimer">${isDemo ? "Respuestas ilustrativas de demostración." : "Conectada al asistente de esta app."}<br>Nunca ejecuta operaciones ni predice precios.</p></div></section>
+          <section class="card learning-card" aria-label="Tu alcancía"><p class="eyebrow">TU ALCANCÍA</p><h3 class="learning-title">${icon("target")}Un paso a la vez</h3><p>Tu colchón para invertir con tranquilidad.</p>
+            <div class="savings-value">S/ ${state.savings.toLocaleString("en-US")} <small>${goalPractical > 0 ? "de S/ " + goalPractical.toLocaleString("en-US") : "sin meta aún"}</small></div>
+            <div class="progress" role="progressbar" aria-label="Progreso de la alcancía" aria-valuemin="0" aria-valuemax="${goalPractical || 1}" aria-valuenow="${Math.min(state.savings, goalPractical)}"><span style="width:${goalPractical > 0 ? Math.min(state.savings / goalPractical * 100, 100) : 0}%"></span></div>
+            <div class="progress-captions"><span>${goalPractical > 0 ? Math.round(Math.min(state.savings / goalPractical, 1) * 100) + "% de tu meta práctica" : "Aún no hay meta calculable"}</span><span>${goalOptimal > 0 ? "Meta óptima S/ " + goalOptimal.toLocaleString("en-US") : ""}</span></div>
+            <form class="inline-form" id="form-savings"><label class="sr-only" for="input-savings">Registrar ahorro en soles</label><input class="field" id="input-savings" value="${escapeHtml(state.homeSavingText)}" placeholder="Ej. guardé 80 soles" autocomplete="off"/><button class="btn" aria-label="Preparar aporte">${icon("arrow")}</button></form>
+            ${state.homeDraft !== null ? `
+              <div class="draft-card"><strong>Revisa antes de guardar</strong><p class="muted">Aporte: S/ ${state.homeDraft.toFixed(2)}</p>
+                <label class="check-line"><input type="checkbox" id="check-savings-reviewed" ${state.homeReviewed ? "checked" : ""}/> Confirmo que el importe es correcto</label>
+                <div class="dialog-actions"><button type="button" class="btn" data-action="cancel-savings-draft">Cancelar</button><button type="button" class="btn btn-primary" data-action="save-savings-draft" ${!state.homeReviewed ? "disabled" : ""}>Guardar aporte</button></div>
+              </div>` : ""}
+          </section>
+        </aside>
       </div>
-      ${ctx.existing?`<div class="alert riesgo_elevado">Ya hay fundamentales para ${esc(ctx.ticker)} (fuente: ${esc(fundCurrentSource(ctx.ticker))}). Guardar esta foto reemplazará los datos anteriores, incluidos campos que ahora queden vacíos.
-        <label class="review-check"><input id="fp-replace" type="checkbox">Acepto reemplazar los fundamentales existentes después de compararlos.</label></div>`:''}
-      <label class="review-check"><input id="fp-confirm" type="checkbox">He contrastado campos, fecha, período y ambas escalas con el informe original.</label>
-      <button id="fp-save" type="button" onclick="fundPhotoSave()">Guardar informe revisado</button>
-      <p id="fp-save-status" class="sm" role="status"></p>
-    </div>`;
-  }catch(e){ if($('#fp-status') && version===_fundPhotoVersion) $('#fp-status').textContent=reviewError(e,e.message||'No se pudo analizar el informe.'); }
-  finally{ if($('#fp-analyze')) button.disabled=false; }
-}
-function fundCurrentSource(ticker){ return _fundPhotoContext?.ticker===ticker ? (_fundPhotoContext.source||'no indicada') : 'no indicada'; }
-async function fundPhotoSave(){
-  const ctx=_fundPhotoContext, status=$('#fp-save-status'), button=$('#fp-save');
-  if(!ctx || !status) return;
-  const source=$('#fp-source').value.trim(), asof=$('#fp-asof').value, period=$('#fp-period').value;
-  const unit=$('#fp-unit').value, shares_unit=$('#fp-shares-unit').value;
-  if(!source || !asof || !period || !unit || !shares_unit || !$('#fp-confirm').checked){
-    status.textContent='Confirma fuente, fecha de cierre, período anual/TTM, las dos escalas y la revisión del informe.'; return;
+
+      <section class="card mt-24" aria-label="Tu marcador">
+        <div class="section-header"><div class="section-title"><h2>Tu marcador</h2><p class="small muted">Lo que pusiste, lo que tienes y la diferencia real.</p></div><span class="badge badge-muted">SIN LETRA PEQUEÑA</span></div>
+        <ul class="kv-list">
+          <li class="kv-row"><span>Depósitos netos</span><strong>${moneyOrNA(netDeposits)}</strong></li>
+          <li class="kv-row"><span>Costo de cambiar soles a dólares <span class="badge badge-muted">${escapeHtml(fxLabel)}</span></span><strong>${fxCost == null ? "Sin dato" : privateText("−" + money(fxCost))}</strong></li>
+          <li class="kv-row kv-highlight"><span>Salió de tu bolsillo</span><strong>${moneyOrNA(pocketOut)}</strong></li>
+          <li class="kv-row"><span>Tu cartera hoy <span class="badge ${isDemo ? "badge-demo" : "badge-green"}">${isDemo ? "HECHO · DEMO" : "HECHO"}</span></span><strong>${privateText(money(invested))}</strong></li>
+          <li class="kv-row kv-result"><span>Resultado de bolsillo</span><strong class="${result != null && result < 0 ? "negative" : "positive"}">${result == null ? "Sin dato" : privateText((result >= 0 ? "+" : "−") + money(Math.abs(result)))}</strong></li>
+        </ul>
+        <div class="card-foot"><span>Comparación con S&amp;P 500</span><strong>${spyDiff == null ? "Sin dato" : `${spyDiff >= 0 ? "+" : ""}${spyDiff.toFixed(1)}% ${icon("arrowup","icon-sm")}`}</strong></div>
+      </section>
+
+      ${advanced("Pulso de mercado y métricas de riesgo", `
+        <div class="advanced-grid">
+          <div>
+            <span class="eyebrow">PULSO DE MERCADO</span>
+            <h3>Una foto más amplia</h3>
+            <p>${isDemo ? "Datos de referencia ilustrativos. Verifica precios y fechas antes de decidir." : escapeHtml((state.serverPulse && state.serverPulse.lectura) || "Fuente: Yahoo Finance y tus datos guardados. Regla técnica, no predicción.")}</p>
+          </div>
+          <div class="advanced-metrics">
+            <div><span>S&amp;P 500 (SPY)</span><strong>${spyVal}</strong><small>${spyChg}</small></div>
+            <div><span>Concentración (HHI)</span><strong>${hhiVal}</strong><small>CÁLCULO</small></div>
+            <div><span>Diversificación efectiva</span><strong>${divVal}</strong><small>CÁLCULO</small></div>
+          </div>
+        </div>
+      `)}
+    ` + footer();
   }
-  if(ctx.existing && !$('#fp-replace').checked){ status.textContent='Para reemplazar los datos existentes marca el consentimiento expreso.'; return; }
-  if(!$('#fp-asof').checkValidity()){ status.textContent='La fecha de cierre no es válida.'; return; }
-  const data={};
-  ctx.fields.forEach(([key])=>{ const value=$('#fp-'+key).value.trim(); data[key]=value===''?null:value; });
-  if(!Object.values(data).some(x=>x!==null)){ status.textContent='No hay valores visibles para guardar.'; return; }
-  button.disabled=true; status.textContent='Guardando solo los datos revisados…';
-  try{
-    const body={data,source,asof,period,unit,shares_unit};
-    if(ctx.existing) body.replace_existing=true;
-    await api('/fundamentals/'+encodeURIComponent(ctx.ticker)+'/photo/save',{method:'POST',body});
-    if($('#fp-save-status')){
-      status.textContent='Informe guardado. Reabre Fundamentales para importar otro informe o vuelve a analizar el activo.';
-      button.disabled=true; $('#fp-analyze').disabled=true;
+
+  // ---- Mi cartera ----
+  function positionsTable() {
+    const invested = investedTotal();
+    return `<table class="positions-table"><caption class="sr-only">Posiciones de la cartera. Los importes están en dólares estadounidenses.</caption><thead><tr><th scope="col">Activo</th><th scope="col">Precio utilizado</th><th scope="col">Valor en cartera</th><th scope="col">Resultado</th><th scope="col"><span class="sr-only">Detalles</span></th></tr></thead><tbody>${state.assets.map(a => {
+      const value = round(a.shares * a.price), gain = round(value - a.cost);
+      return `<tr><td>${assetLabel(a.ticker, a.name, monoTone(a.ticker, a.type || assetType(a.ticker)))}</td><td data-label="Precio utilizado">${privateText(money(a.price))}<span class="cell-sub">${a.shares} ${a.type === "ETF" ? "participaciones" : "acciones"}</span></td><td data-label="Valor en cartera">${privateText(money(value))}<span class="cell-sub">${(value / (invested || 1) * 100).toFixed(1)}% de lo invertido</span></td><td data-label="Resultado">${privateText((gain >= 0 ? "+" : "−") + money(Math.abs(gain)), gain >= 0 ? "positive" : "negative")}<span class="cell-sub ${a.change >= 0 ? "positive" : "negative"}">${privateText(pct(a.change))} vs. costo</span></td><td><button class="icon-btn" data-action="asset" data-ticker="${escapeHtml(a.ticker)}" aria-label="Ver detalle de ${escapeHtml(a.ticker)}">${icon("chevron")}</button></td></tr>`;
+    }).join("")}</tbody></table>`;
+  }
+
+  function walletMetricCards() {
+    const invested = investedTotal();
+    const gain = round(invested - costBasis());
+    const cost = costBasis();
+    return `<dl class="wallet-metrics">
+      <div class="card wallet-metric"><dt>Invertido en posiciones</dt><dd>${privateText(money(invested))}</dd><p>${state.assets.length} ${state.assets.length === 1 ? "activo" : "activos"} en tu cartera</p></div>
+      <div class="card wallet-metric"><dt>Resultado no realizado</dt><dd>${privateText((gain >= 0 ? "+" : "−") + money(Math.abs(gain)), gain >= 0 ? "positive" : "negative")}</dd><p>${cost > 0 ? privateText(pct(gain / cost * 100)) + " sobre el coste de las posiciones" : "Sin coste registrado aún"}</p></div>
+      <div class="card wallet-metric"><dt>Saldo disponible</dt><dd>${privateText(money(state.cash))}</dd><p>${isDemoMode() ? "Saldo ilustrativo de demostración" : "Efectivo registrado en tu cartera"}</p></div>
+    </dl>`;
+  }
+
+  const watchPool = () => {
+    const map = new Map();
+    state.radar.forEach(r => map.set(r.ticker, {ticker:r.ticker, name:r.name, price:r.price, type:assetType(r.ticker, r.sector || ""), sector:r.sector, note:r.note, verdict:r.verdict, tone:r.tone, src:"radar"}));
+    state.assets.forEach(a => { const existing = map.get(a.ticker) || {}; map.set(a.ticker, {ticker:a.ticker, name:existing.name || a.name, price:existing.price || money(a.price), type:existing.type || assetType(a.ticker), sector:existing.sector || "", note:existing.note || "", verdict:existing.verdict || "", tone:existing.tone || "gray", src:"posicion"}); });
+    return [...map.values()];
+  };
+
+  function assetCard(item) {
+    const inWallet = state.assets.some(a => a.ticker === item.ticker);
+    const type = item.type || assetType(item.ticker);
+    const tone = monoTone(item.ticker, type);
+    return `<article class="card asset-card"><div class="asset-card-top">${monogram(item.ticker[0] || "?", tone)}${watchButton(item.ticker)}</div><span class="badge ${type === "ETF" ? "badge-purple" : "badge-blue"}">${type}</span>${item.verdict ? ` <span class="badge ${item.tone === "green" ? "badge-green" : item.tone === "orange" ? "badge-demo" : "badge-muted"}">${escapeHtml(item.verdict)}</span>` : ""}<h2 style="margin-top:12px">${escapeHtml(item.ticker)}</h2><p class="asset-company">${escapeHtml(item.name)}</p><p class="asset-card-price">${privateText(item.price)}</p><p class="small muted" style="margin-top:4px">${inWallet ? "Ya está en tu cartera" : escapeHtml(item.sector || "Precio de referencia")}</p><div class="asset-card-bottom"><span class="small muted">${item.src === "posicion" ? "Tu posición" : "Del radar"}</span><button class="btn btn-plain" data-action="${item.src === "posicion" ? "asset" : "radar-asset"}" data-ticker="${escapeHtml(item.ticker)}">Detalles ${icon("arrow","icon-sm")}</button></div></article>`;
+  }
+
+  function renderWalletContent() {
+    const host = document.getElementById("wallet-content");
+    if (!host) return;
+    if (state.walletTab === "posiciones") {
+      host.innerHTML = state.assets.length
+        ? `<section class="card"><div class="section-header"><h2>Tus ${state.assets.length} ${state.assets.length === 1 ? "posición" : "posiciones"}</h2><span class="small muted">Resultados sobre el costo de compra</span></div>${positionsTable()}</section>`
+        : `<section class="empty-state">${icon("wallet")}<h2>Aún no hay posiciones.</h2><p>Registra tu primera posición desde Sincronización.</p><button class="btn btn-primary" data-action="start-import">Registrar posición ${icon("arrow")}</button></section>`;
+    } else {
+      const watched = watchPool().filter(a => state.watched.has(a.ticker));
+      host.innerHTML = watched.length
+        ? `<div class="explore-grid">${watched.map(assetCard).join("")}</div>`
+        : `<section class="empty-state">${icon("star")}<h2>Aún no sigues ningún activo.</h2><p>Guarda activos desde Explorar para encontrarlos aquí.</p><a class="btn btn-primary" href="#explorar">Explorar activos ${icon("arrow")}</a></section>`;
     }
-  }catch(e){ if($('#fp-save-status')) status.textContent=reviewError(e,'No se pudo guardar el informe.'); }
-  finally{ if($('#fp-save') && !status.textContent.startsWith('Informe guardado')) button.disabled=false; }
-}
-async function saveFund(tk, keys){
-  if(_fundPhotoContext?.ticker===tk && _fundPhotoContext.period &&
-     !confirm('El ingreso manual reemplazará los datos extraídos del informe, incluidas su fecha y sus unidades. ¿Ya verificaste las cifras y deseas reemplazarlas?')) return;
-  const data = {};
-  keys.forEach(k=>{ const v=$('#f-'+k).value.trim(); if(v!=='') data[k]=isNaN(+v)?v:+v; });
-  try{
-    await api('/fundamentals/'+tk,{method:'PUT',body:{data,source:$('#f-source').value,asof:$('#f-asof').value}});
-    alert('Guardado.');
-    if($('#tc-go')) tradeCheck(); else analisis(tk);
-  }catch(e){ alert(e.detail||'Error'); }
-}
-
-/* ---------- 4. Oportunidades (radar) ---------- */
-const RD_LABELS = {barata_y_buena:'Barata y buena',precio_justo:'Precio justo',
-  buena_pero_cara:'Buena pero cara',cuidado:'Cuidado',faltan_datos:'Faltan datos'};
-const RD_PILL = {barata_y_buena:'ok',precio_justo:'',buena_pero_cara:'warn',cuidado:'warn',faltan_datos:'mut'};
-let _rdMsg = '', _rdErrs = [];
-
-async function oportunidades(){
-  const [r, cands] = await Promise.all([api('/radar'), api('/candidates')]);
-  const notas = (cands.candidates||[]).filter(c=>Object.keys(c.data||{}).length||c.source!=='radar');
-  $('#view').innerHTML = `
-  <h2>Radar de oportunidades</h2>
-  <p class="sub">El sistema puntúa ${r.universo} empresas grandes + las que agregues + tu cartera,
-    con precio real y datos del 10-K de la SEC. Tú decides.</p>
-  <div class="card"><div class="row">
-    <div style="width:170px"><input id="rd-tk" placeholder="Ticker (p. ej. KO)" style="text-transform:uppercase"></div>
-    <button type="button" onclick="rdAdd()">Agregar a mi radar</button>
-    <button type="button" class="sec" onclick="rdRefresh()">Buscar oportunidades ahora</button>
-    </div>
-    <p id="rd-status" class="sm mut" role="status" style="margin-top:8px">${esc(_rdMsg)}</p>
-    ${_rdErrs.map(e=>`<p class="sm mut" style="margin:2px 0">${esc(e.ticker)}: ${esc(e.error)}</p>`).join('')}
-  </div>
-  <div class="card"><table><tr><th>Ticker</th><th>Precio</th><th>Calidad</th><th>Margen seg.</th><th>P/E</th><th>Crec. ing.</th><th>Veredicto</th><th></th></tr>
-    ${r.items.map(it=>{
-      const falta = it.veredicto==='faltan_datos'
-        ? [!it.fund&&'sin 10-K en la SEC', !it.price&&'sin precio'].filter(Boolean).join(' · ') : '';
-      return `<tr style="cursor:pointer" onclick="location.hash='#analisis/${it.ticker}'">
-      <td><b>${esc(it.ticker)}</b>
-        ${it.en_cartera?'<span class="pill mut" style="font-size:11px;padding:1px 8px">en cartera</span>':''}
-        ${it.en_watchlist?'<span class="pill mut" style="font-size:11px;padding:1px 8px">mi radar</span>':''}<br>
-        <span class="sm mut">${esc(it.sector)}</span></td>
-      <td>${it.price?`$ ${fmt(it.price.price)}<br><span class="sm mut">${esc(it.price.asof||'')} · ${esc(it.price.status)}</span>`:'—'}</td>
-      <td>${it.calidad==null?'—':fmt(it.calidad,1)+'/10'}</td>
-      <td>${it.mos==null?'—':fmt(it.mos,1)+' %'}</td>
-      <td>${it.pe==null?'—':fmt(it.pe,1)}</td>
-      <td>${it.crec==null?'—':fmt(it.crec,1)+' %'}</td>
-      <td><span class="pill ${RD_PILL[it.veredicto]||''}" title="${esc((it.motivos||[]).join(' · '))}">${RD_LABELS[it.veredicto]||esc(it.veredicto)}</span>
-        ${falta?`<br><span class="sm mut">${esc(falta)}</span>`:''}
-        ${(it.motivos||[]).length?`<br><span class="sm mut">${esc(it.motivos.join(' · '))}</span>`:''}</td>
-      <td>${it.en_watchlist?`<button class="mini danger" onclick="event.stopPropagation();rdQuitar(${it.candidate_id})">Quitar</button> `:''}
-        <a class="mini" href="#analisis/${it.ticker}" onclick="event.stopPropagation()">Ver</a></td>
-      </tr>`;}).join('')}
-    </table>
-    <p class="sm mut">${esc(r.nota)}</p></div>
-  <details class="card"><summary>Mis candidatos con notas propias (${notas.length})</summary>
-    <p class="sm mut">Candidatos que registraste con tus propias puntuaciones, tesis y fuente.</p>
-    <div class="grid g3">
-      <div><label>Ticker</label><input id="c-tk"></div>
-      <div><label>Nombre</label><input id="c-name"></div>
-      <div><label>Fuente de tus datos (obligatoria)</label><input id="c-src" placeholder="p. ej. 10-K + análisis propio"></div>
-      ${['calidad','crecimiento','valoracion','margen_seguridad','solidez','riesgo'].map(k=>
-        `<div><label>${k.replaceAll('_',' ')} (0–10)</label><input id="c-${k}" type="number" min="0" max="10"></div>`).join('')}
-    </div>
-    <label>Tesis</label><textarea id="c-tesis"></textarea>
-    <div class="grid g3">
-      <div><label>Catalizadores</label><input id="c-cat"></div>
-      <div><label>Condición de entrada</label><input id="c-ent"></div>
-      <div><label>Condición de invalidación</label><input id="c-inv"></div>
-    </div>
-    <button style="margin-top:10px" onclick="addCand()">Agregar candidato</button>
-    ${notas.length?`<table style="margin-top:14px"><tr><th>#</th><th>Ticker</th><th>Puntaje</th><th>Tesis</th><th>Condiciones</th><th>Fuente</th><th></th></tr>
-    ${notas.map((c,i)=>`<tr><td>${i+1}</td><td><b>${esc(c.ticker)}</b><br><span class="sm mut">${esc(c.name||'')}</span></td>
-      <td><b>${c.ranking_score??'—'}</b></td>
-      <td class="sm">${esc(c.data.tesis||'')}</td>
-      <td class="sm">entrada: ${esc(c.data.condicion_entrada||'—')}<br>invalida: ${esc(c.data.condicion_invalidacion||'—')}</td>
-      <td class="sm mut">${esc(c.source)}</td>
-      <td><button class="mini danger" onclick="delCand(${c.id})">✕</button></td></tr>`).join('')}
-    </table>`:'<p class="sm mut" style="margin-top:12px">Todavía no tienes candidatos con notas propias.</p>'}
-  </details>${DISC}`;
-  _rdMsg = ''; _rdErrs = [];
-}
-async function rdAdd(){
-  const tk = ($('#rd-tk').value||'').trim().toUpperCase();
-  const st = $('#rd-status');
-  if(!tk){ st.textContent = 'Escribe un ticker.'; return; }
-  st.textContent = `Agregando ${tk}: descargando su precio y su 10-K…`;
-  try{
-    const r = await api('/radar/'+encodeURIComponent(tk),{method:'POST'});
-    _rdErrs = r.errores||[];
-    _rdMsg = _rdErrs.length ? `${tk} agregado con avisos:` : `${tk} agregado a tu radar.`;
-    oportunidades();
-  }catch(e){ st.textContent = e.detail||'No se pudo agregar el ticker.'; }
-}
-async function rdRefresh(){
-  const st = $('#rd-status');
-  st.textContent = 'Descargando precios y 10-K… la primera vez puede tardar unos minutos';
-  try{
-    const r = await api('/radar/refresh',{method:'POST'});
-    _rdErrs = r.errores||[];
-    _rdMsg = `${r.precios} precios · ${r.fundamentales_nuevos} 10-K nuevos · ${r.errores.length} errores`;
-    oportunidades();
-  }catch(e){ st.textContent = e.detail||'No se pudo actualizar el radar.'; }
-}
-async function rdQuitar(id){ await api('/candidates/'+id,{method:'DELETE'}); oportunidades(); }
-async function delCand(id){ await api('/candidates/'+id,{method:'DELETE'}); oportunidades(); }
-async function addCand(){
-  const data = {tesis:$('#c-tesis').value, catalizadores:$('#c-cat').value,
-    condicion_entrada:$('#c-ent').value, condicion_invalidacion:$('#c-inv').value};
-  ['calidad','crecimiento','valoracion','margen_seguridad','solidez','riesgo'].forEach(k=>{
-    const v=$('#c-'+k).value; if(v!=='') data[k]=+v; });
-  try{
-    await api('/candidates',{method:'POST',body:{ticker:$('#c-tk').value,name:$('#c-name').value,source:$('#c-src').value,data}});
-    oportunidades();
-  }catch(e){ alert(e.detail||'Error'); }
-}
-
-/* ---------- 8. Diario ---------- */
-async function diario(){
-  const [r, d] = await Promise.all([api('/journal'), api('/decisions')]);
-  $('#view').innerHTML = `
-  <h2>Diario de inversión</h2>
-  <p class="sub">Registra la tesis ANTES de operar y evalúa DESPUÉS el proceso, no solo el resultado: una decisión puede ser correcta y perder dinero (y viceversa).</p>
-  <div class="card"><h3>Nueva entrada</h3>
-    <div class="grid g3">
-      <div><label>Ticker</label><input id="j-tk"></div>
-      <div><label>Acción</label><select id="j-act">${['revision','comprar','agregar','reducir','vender','esperar'].map(a=>`<option>${a}</option>`).join('')}</select></div>
-      <div><label>Fecha de revisión de la tesis</label><input id="j-rev" type="date"></div>
-    </div>
-    <div class="grid g2">
-      <div><label>Tesis *</label><textarea id="j-tesis"></textarea></div>
-      <div><label>Riesgos *</label><textarea id="j-riesgos"></textarea></div>
-      <div><label>Condición de invalidación *</label><textarea id="j-inv"></textarea></div>
-      <div><label>Precio</label><input id="j-precio" type="number" step="any"></div>
-    </div>
-    <button style="margin-top:10px" onclick="addJournal()">Registrar</button>
-    <p class="sm mut">* obligatorios si la acción es una operación (comprar/vender/agregar/reducir).</p></div>
-  ${r.entries.map(e=>`<div class="card"><h3>${esc(e.ticker||'cartera')} · ${esc(e.action)} <span class="sm mut">${e.created_at.slice(0,10)}</span>
-    ${e.evaluation?'<span class="pill ok">evaluada</span>':(e.review_date?`<span class="pill warn">revisar ${e.review_date}</span>`:'')}</h3>
-    <p class="sm"><b>Tesis:</b> ${esc(e.data.tesis||'—')} · <b>Riesgos:</b> ${esc(e.data.riesgos||'—')} · <b>Invalidación:</b> ${esc(e.data.condicion_invalidacion||'—')}</p>
-    <button class="mini sec" type="button" onclick="challengeJournal(${e.id})">Cuestionar tesis con Luna</button>
-    <p class="sm mut">Luna propone preguntas, no órdenes. La consulta al proveedor de IA puede generar costo.</p>
-    <div id="challenge-${e.id}" class="assistant-answer sm" role="status"></div>
-    ${e.evaluation? `<p class="sm"><b>Evaluación:</b> ${esc(e.evaluation.que_ocurrio||'')} · proceso/suerte: ${esc(e.evaluation.suerte_o_proceso||'')} · lección: ${esc(e.evaluation.leccion||'')}</p>`
-     : `<details><summary class="sm">Evaluar ahora</summary>
-        <div class="grid g3">
-        <div><label>¿Qué ocurrió?</label><input id="ev-que-${e.id}"></div>
-        <div><label>¿Tesis correcta?</label><select id="ev-tesis-${e.id}"><option>sí</option><option>no</option><option>parcialmente</option></select></div>
-        <div><label>¿Suerte o proceso?</label><select id="ev-sp-${e.id}"><option>proceso</option><option>suerte</option><option>mala suerte con buen proceso</option><option>mal proceso</option></select></div>
-        <div><label>¿Hubo FOMO?</label><select id="ev-fomo-${e.id}"><option>no</option><option>sí</option></select></div>
-        <div><label>¿Se vendió por miedo?</label><select id="ev-miedo-${e.id}"><option>no</option><option>sí</option></select></div>
-        <div><label>Lección</label><input id="ev-lec-${e.id}"></div></div>
-        <button class="mini" style="margin-top:8px" onclick="evalJournal(${e.id})">Guardar evaluación</button></details>`}
-  </div>`).join('')}
-  <div class="card"><h3>Historial de decisiones (${d.decisions.length})</h3>
-    <table><tr><th>Fecha</th><th>Ticker</th><th>Propuesta</th><th>Tu decisión</th><th>Contexto</th></tr>
-    ${d.decisions.map(x=>`<tr><td class="sm">${x.created_at.slice(0,16).replace('T',' ')}</td><td><b>${x.ticker}</b></td>
-      <td><span class="pill">${esc(x.proposal.decision)}</span> <span class="sm mut">conf. ${esc(x.proposal.confianza)}</span></td>
-      <td>${x.user_choice?`<b>${esc(x.user_choice)}</b>`:'<span class="mut sm">sin registrar</span>'}</td>
-      <td class="sm mut">peso ${fmt(x.proposal.peso,1)}% · margen ${x.proposal.margen_seguridad==null?'s/d':fmt(x.proposal.margen_seguridad,1)+'%'}
-        ${x.proposal.argumentos?.length?`<br><button class="mini sec" type="button" onclick="explainDecision(${x.id})">Explicar con Luna</button>
-          <div id="explain-${x.id}" class="assistant-answer sm" role="status"></div>`:
-          '<br>Propuesta antigua: no se guardaron los argumentos para explicarla.'}</td></tr>`).join('')}</table></div>${DISC}`;
-}
-async function challengeJournal(id){
-  const output=$('#challenge-'+id);
-  if(!output) return;
-  output.textContent='Consultando contraargumentos para la tesis guardada…';
-  try{
-    const result=await api(`/journal/${id}/challenge`,{method:'POST'});
-    if($('#challenge-'+id)===output) output.textContent=result.counterarguments.map((item,i)=>
-      `${i+1}. ${item.argumento}\n${item.verificar}`).join('\n\n')+`\n\nModelo: ${result.model}. Verifica las preguntas con tus fuentes.`;
-  }catch(e){ if($('#challenge-'+id)) output.textContent=reviewError(e,'No se pudo cuestionar la tesis.'); }
-}
-async function addJournal(){
-  try{
-    await api('/journal',{method:'POST',body:{ticker:$('#j-tk').value,action:$('#j-act').value,
-      tesis:$('#j-tesis').value,riesgos:$('#j-riesgos').value,
-      condicion_invalidacion:$('#j-inv').value,precio:$('#j-precio').value?+$('#j-precio').value:null,
-      review_date:$('#j-rev').value}});
-    diario();
-  }catch(e){ alert(e.detail||'Error'); }
-}
-async function evalJournal(id){
-  await api(`/journal/${id}/evaluate`,{method:'POST',body:{
-    que_ocurrio:$('#ev-que-'+id).value, tesis_correcta:$('#ev-tesis-'+id).value,
-    suerte_o_proceso:$('#ev-sp-'+id).value, hubo_fomo:$('#ev-fomo-'+id).value,
-    vendio_por_miedo:$('#ev-miedo-'+id).value, leccion:$('#ev-lec-'+id).value}});
-  diario();
-}
-
-/* ---------- 10. Ajustes (perfil, límites, datos) ---------- */
-const PROFILE_LABELS = {horizonte_anios:'Horizonte de inversión (años)',objetivo:'Objetivo financiero',
-  perdida_maxima_pct:'Pérdida máxima tolerable %',nivel_riesgo:'Nivel de riesgo'};
-function profileFormHtml(r){
-  return `<div class="grid g2">${r.fields.map(f=> f==='nivel_riesgo'
-    ? `<div><label>${PROFILE_LABELS[f]}</label><select id="rp-${f}">${['','conservador','moderado','agresivo'].map(v=>`<option value="${v}" ${v===(r.profile[f]??'')?'selected':''}>${v||'Elige…'}</option>`).join('')}</select></div>`
-    : `<div><label>${PROFILE_LABELS[f]||f}</label><input id="rp-${f}" value="${esc(r.profile[f]??'')}"></div>`).join('')}
-  </div><button style="margin-top:12px" onclick="saveProfile()">Guardar perfil</button>`;
-}
-async function saveProfile(){
-  const body = {}; (window._rpFields||[]).forEach(f=>{ const el=$('#rp-'+f); if(el) body[f]=el.value; });
-  await api('/profile',{method:'PUT',body});
-  route();
-}
-
-/* ---------- 11. Configuración (límites de riesgo) ---------- */
-const LIMIT_LABELS = {max_position_pct:'Máximo % por empresa',max_sector_pct:'Máximo % por sector',
-  max_trade_pct:'Máximo % por operación',max_tolerable_loss_pct:'Pérdida máxima tolerable %',
-  min_cash_reserve:'Reserva mínima de efectivo (USD)',max_trades_per_month:'Máx. operaciones al mes'};
-async function ajustes(){
-  const [s, prof, pf] = await Promise.all([api('/settings'), api('/profile'), api('/portfolio')]);
-  const n = pf.positions.length;
-  const limitWarn = n && s.limits.max_position_pct < 100/n
-    ? `<div class="alert">Con ${n} posiciones, cada una pesa en promedio ${fmt(100/n,0)} %. Si tu máximo por empresa es menor, verás alertas permanentes y el motor propondrá reducir.</div>` : '';
-  $('#view').innerHTML = `
-  <h2>Ajustes</h2><p class="sub">Tu perfil y las reglas de riesgo que alimentan alertas y el motor de decisiones.</p>
-  <div class="card"><h3>Perfil de riesgo</h3>
-    <p class="sm mut">${prof.complete?'Perfil completo: las recomendaciones pueden personalizarse.':'Perfil incompleto: los análisis serán informativos, no recomendaciones personalizadas.'}</p>
-    ${profileFormHtml(prof)}</div>
-  <div class="card"><h3>Límites de riesgo</h3>
-    ${limitWarn}
-    <div class="grid g3">
-    ${Object.entries(s.limits).map(([k,v])=>`<div><label>${LIMIT_LABELS[k]||k}</label><input id="lm-${k}" type="number" step="any" value="${v}"></div>`).join('')}
-  </div><button style="margin-top:12px" onclick="saveLimits(${JSON.stringify(Object.keys(s.limits)).replaceAll('"',"'")})">Guardar límites</button></div>
-  <div class="card"><h3 style="color:var(--err)">Zona de peligro</h3>
-    <p class="sm">Elimina posiciones, fundamentales, operaciones, diario, decisiones y candidatos.</p>
-    <button class="danger" onclick="wipe()">Eliminar todos mis datos</button></div>${DISC}`;
-  window._rpFields = prof.fields;
-}
-async function saveLimits(keys){
-  const body={}; keys.forEach(k=>{ body[k]=+$('#lm-'+k).value; });
-  await api('/limits',{method:'PUT',body}); alert('Límites guardados'); ajustes();
-}
-async function wipe(){
-  if(prompt('Irreversible. Escribe ELIMINAR:')==='ELIMINAR'){
-    await api('/settings/delete_all',{method:'POST',body:{confirm:'ELIMINAR'}}); alert('Datos eliminados'); route();
+    document.querySelectorAll("[data-wallet-tab]").forEach(el => el.setAttribute("aria-pressed", String(el.dataset.walletTab === state.walletTab)));
+    applyPrivacy();
   }
-}
 
-route();
+  function renderCartera() {
+    const isDemo = isDemoMode();
+    main.innerHTML = intro(
+      "TU DINERO EN MOVIMIENTO",
+      "Mi cartera.",
+      "Cada posición en su lugar. Cada número con su fuente y su fecha.",
+      `<button class="btn" data-action="privacy" aria-pressed="${state.private}" aria-label="${state.private ? "Mostrar" : "Ocultar"} importes">${icon(state.private ? "eyeoff" : "eye")}<span>${state.private ? "Mostrar" : "Ocultar"} importes</span></button><button class="btn" data-action="export">${icon("download")}Exportar CSV</button><button class="btn btn-primary" data-action="start-sync">${icon("camera")}Sincronizar</button>`
+    ) + walletMetricCards() +
+    `<div class="notice">${icon("info")}<p>El resultado no realizado es el valor actual menos el costo de compra. No incluye comisiones ni impuestos y no garantiza resultados futuros.</p></div>
+     <div class="toolbar"><div class="tab-group" aria-label="Vista de la cartera"><button class="tab-btn" data-action="wallet-tab" data-wallet-tab="posiciones" aria-pressed="${state.walletTab === "posiciones"}">Posiciones</button><button class="tab-btn" data-action="wallet-tab" data-wallet-tab="seguimiento" aria-pressed="${state.walletTab === "seguimiento"}">Seguimiento <span id="watch-count">(${state.watched.size})</span></button></div><span class="small muted">${isDemo ? "Escenario ilustrativo" : escapeHtml(state.lastRef || "Precios guardados")}</span></div>
+     <div id="wallet-content"></div>
+
+     <section class="card mt-24" id="sync" aria-label="Sincronización">
+       <div class="section-header"><div class="section-title"><h2>Sincronización</h2><p class="small muted">Mantén todo al día, con tu revisión.</p></div><div class="tab-group"><button class="tab-btn" data-action="sync-tab" data-tab="resumen" aria-pressed="${!state.portfolioSync}">Resumen</button><button class="tab-btn" data-action="sync-tab" data-tab="importar" aria-pressed="${state.portfolioSync}">Importar posición</button></div></div>
+       ${!state.portfolioSync ? `
+         <div class="tool-note">${icon("shield","icon-lg")}<div><strong>Tú tienes la última palabra</strong><p>Ninguna foto ni dato externo modifica tu cartera hasta que revises y confirmes cada importe.</p></div><button class="btn" data-action="start-import">Empezar ${icon("arrow","icon-sm")}</button></div>
+       ` : `
+         <div class="sync-grid">
+           <div><h3>Trae tu cartera a este espacio</h3><p>Puedes adjuntar una captura de Hapi como referencia y transcribir los datos. La lectura es tuya: confirma cada número antes de guardar.</p>
+             <input type="file" id="file-capture" accept="image/*" hidden/>
+             <button type="button" class="upload" data-action="trigger-upload">${icon("camera","icon-lg")}<strong>${escapeHtml(state.portfolioFileName) || "Elegir una captura"}</strong><small>PNG o JPG · solo referencia visual</small></button>
+           </div>
+           <div class="sync-fields">
+             <span class="eyebrow">BORRADOR EDITABLE</span>
+             <div class="field-pair">
+               <label class="field-label">Ticker<input class="field" id="sync-ticker" value="${escapeHtml(state.portfolioTicker)}" maxlength="10" placeholder="Ej. VOO"/></label>
+               <label class="field-label">Participaciones<input class="field" type="number" min="0" step="any" id="sync-shares" value="${escapeHtml(state.portfolioShares)}" placeholder="0.00"/></label>
+             </div>
+             <label class="field-label">Precio por participación · USD<input class="field" type="number" min="0" step="any" id="sync-price" value="${escapeHtml(state.portfolioPrice)}" placeholder="0.00"/></label>
+             <label class="check-line"><input type="checkbox" id="sync-check" ${state.portfolioChecked ? "checked" : ""}/> Revisé cada dato contra Hapi</label>
+             <label class="check-line"><input type="checkbox" id="sync-replace" ${state.portfolioReplace ? "checked" : ""}/> Reemplazar toda mi cartera</label>
+             ${state.portfolioReplace ? `<label class="check-line warning"><input type="checkbox" id="sync-confirm-replace" ${state.portfolioConfirmReplace ? "checked" : ""}/> Entiendo que se quitarán ${state.assets.map(a => a.ticker).join(", ")}</label>` : ""}
+             <button type="button" class="btn btn-primary" data-action="save-sync" ${(!/^[A-Z][A-Z0-9.]{0,9}$/.test(state.portfolioTicker) || Number(state.portfolioShares) <= 0 || Number(state.portfolioPrice) <= 0 || !state.portfolioChecked || (state.portfolioReplace && !state.portfolioConfirmReplace)) ? "disabled" : ""}>Confirmar importación ${icon("arrow")}</button>
+           </div>
+         </div>`}
+     </section>
+
+     ${advanced("Herramientas avanzadas de cartera", `
+       <div class="advanced-grid">
+         <div><h3>Órdenes y conciliación de costo</h3><p>Esta app no envía operaciones a tu bróker. Las órdenes se anotan aquí solo como registro para conciliar tu costo.</p></div>
+         ${isDemo ? `<button class="btn" data-action="add-cash">Añadir $50 de efectivo demo</button>` : ""}
+       </div>
+     `)}` + footer();
+    renderWalletContent();
+  }
+
+  // ---- ¿Compro o vendo? ----
+  function renderAnalisis() {
+    const ticker = state.analysisTicker.toUpperCase();
+    const asset = state.assets.find(a => a.ticker === ticker);
+    const value = asset ? asset.shares * asset.price : 0;
+    const total = investedTotal() + state.cash;
+    const amountNum = Number(state.analysisAmount) || 0;
+    const before = total ? (value / total) * 100 : 0;
+    const after = total ? ((value + (state.analysisSide === "Comprar" ? amountNum : -amountNum)) / total) * 100 : 0;
+    const limitPct = Number(state.settingsLimit) || 40;
+    const valid = /^[A-Z][A-Z0-9.]{0,9}$/.test(ticker) && amountNum > 0 && (state.analysisSide !== "Vender" || (!!asset && amountNum <= value));
+    const datalist = [...new Set([...state.assets.map(a => a.ticker), ...state.radar.map(r => r.ticker)])].slice(0, 60);
+
+    main.innerHTML = intro(
+      "UN PASO ANTES DE ACTUAR",
+      "¿Compro o vendo?",
+      "Una buena decisión empieza con una mejor pregunta."
+    ) + `
+      <div class="analysis-layout">
+        <section class="card analysis-form" aria-label="Simulador de decisión">
+          <span class="eyebrow">SIMULA TU DECISIÓN</span>
+          <h2 style="margin-top:8px">Pongamos los números sobre la mesa</h2>
+          <form id="form-analysis">
+            <label class="field-label">¿Qué activo estás considerando?
+              <div class="search-field" style="width:100%">${icon("search")}<input class="field" list="tickers" id="analysis-ticker" value="${escapeHtml(state.analysisTicker)}" placeholder="Busca un ticker" maxlength="10" autocomplete="off"/></div>
+              <datalist id="tickers">${datalist.map(t => `<option value="${escapeHtml(t)}"></option>`).join("")}</datalist>
+            </label>
+            <div>
+              <span class="field-label" style="margin-bottom:8px">¿Qué quieres hacer?</span>
+              <div class="tab-group" role="group" aria-label="Lado de la operación">
+                <button type="button" class="tab-btn" data-action="side" data-side="Comprar" aria-pressed="${state.analysisSide === "Comprar"}">${icon("arrowdown","icon-sm")} Comprar</button>
+                <button type="button" class="tab-btn" data-action="side" data-side="Vender" aria-pressed="${state.analysisSide === "Vender"}" ${!asset ? "disabled" : ""}>${icon("arrowup","icon-sm")} Vender</button>
+              </div>
+              ${!asset ? '<p class="hint" style="margin-top:8px">Solo puedes simular ventas de posiciones que ya tienes.</p>' : ""}
+            </div>
+            <label class="field-label">Monto en dólares
+              <div class="amount-field"><span>$</span><input type="number" min="0.01" step="0.01" id="analysis-amount" value="${escapeHtml(state.analysisAmount)}"/><span>USD</span></div>
+            </label>
+            <div class="chips">
+              ${[50, 100, 200].map(n => `<button type="button" class="tab-btn" data-action="amount" data-amt="${n}">$${n}</button>`).join("")}
+              ${state.analysisSide === "Vender" && asset ? `<button type="button" class="tab-btn" data-action="amount" data-amt="${value.toFixed(2)}">Toda la posición</button>` : ""}
+              ${state.analysisSide === "Comprar" && state.cash > 0 ? `<button type="button" class="tab-btn" data-action="amount" data-amt="${state.cash.toFixed(2)}">Todo mi efectivo</button>` : ""}
+            </div>
+            <button class="btn btn-primary" id="btn-run-analysis" ${!valid ? "disabled" : ""}>Analizar decisión ${icon("arrow")}</button>
+          </form>
+        </section>
+        <aside class="analysis-aside">
+          <div class="aside-compass">${icon("compass","icon-lg")}</div>
+          <div><span class="eyebrow">DECIDIR CON INTENCIÓN</span><h2>Menos impulso.<br/>Más perspectiva.</h2><p>No buscamos adivinar el mercado. Buscamos que entiendas qué cambia para ti con cada decisión.</p></div>
+          <small>${icon("shield")} Esto es una simulación, no una orden de compra o venta.</small>
+        </aside>
+      </div>
+
+      ${state.analysisShow ? `
+        <section class="card mt-24" aria-label="Resultado de la simulación">
+          <div class="section-header"><div class="section-title"><h2>Así se vería tu decisión</h2><p class="small muted">Simulación ilustrativa basada en los datos actuales.</p></div><span class="badge ${after > limitPct ? "badge-demo" : "badge-green"}">${after > limitPct ? "REVISAR CONCENTRACIÓN" : "DENTRO DEL LÍMITE"}</span></div>
+          <div class="result-grid">
+            <div><span>Peso de ${escapeHtml(ticker)}</span><strong>${before.toFixed(1)}% ${icon("arrow","icon-sm")} ${after.toFixed(1)}%</strong><small>Antes y después</small></div>
+            <div><span>Efectivo disponible</span><strong>${privateText(money(state.cash))} ${icon("arrow","icon-sm")} ${privateText(money(Math.max(0, state.cash + (state.analysisSide === "Vender" ? amountNum : -amountNum))))}</strong><small>Una compra puede requerir depositar fondos</small></div>
+            <div><span>Límite por empresa</span><strong class="${after > limitPct ? "negative" : "positive"}">${after > limitPct ? `Supera el ${limitPct}%` : `Dentro del ${limitPct}%`}</strong><small>Según tu perfil actual</small></div>
+          </div>
+          <div class="opinion">${icon("sparkles")}<div><strong>La segunda mirada de Luna ${isDemoMode() ? '<span class="badge badge-muted">DEMO</span>' : ""}</strong><p>${after > limitPct ? "Esta operación aumentaría tu concentración. Revisa si el tamaño de la posición refleja tu convicción y tu tolerancia al riesgo." : "La simulación no supera tu límite de concentración. Antes de decidir, comprueba el precio, tu tesis y cuánto efectivo necesitas conservar."}</p></div></div>
+          <div class="result-journal">
+            <div><h3>Deja constancia de tu decisión</h3><p>Escribe tu razonamiento ahora; podrás evaluarlo más adelante.</p></div>
+            <div class="form-stack">
+              <label class="field-label">Mi tesis<textarea class="field" id="result-thesis" placeholder="¿Por qué tiene sentido para mí?">${escapeHtml(state.analysisThesis)}</textarea></label>
+              <label class="field-label">Riesgo principal<textarea class="field" id="result-risk" placeholder="¿Qué podría salir mal?">${escapeHtml(state.analysisRisk)}</textarea></label>
+              <label class="field-label">Qué invalidaría mi idea<textarea class="field" id="result-invalidation" placeholder="¿Qué me haría cambiar de opinión?">${escapeHtml(state.analysisInvalidation)}</textarea></label>
+              <button type="button" class="btn btn-primary" data-action="save-analysis-journal" id="btn-save-analysis-journal" ${(!state.analysisThesis.trim() || !state.analysisRisk.trim() || !state.analysisInvalidation.trim()) ? "disabled" : ""}>Guardar en mi diario ${icon("arrow")}</button>
+            </div>
+          </div>
+        </section>` : ""}
+
+      ${advanced("Fundamentos, valuación y análisis técnico", `
+        <div class="advanced-grid">
+          <div><h3>Más profundidad, cuando la necesites</h3><p>DCF, múltiplos, niveles ATR y métricas técnicas requieren datos verificados. Si falta un dato, lo verás marcado como «Sin dato».</p></div>
+          <div class="advanced-metrics">
+            <div><span>DCF</span><strong>Sin dato</strong><small>NO CALCULABLE</small></div>
+            <div><span>RSI 14</span><strong>Sin dato</strong><small>NO VERIFICADO</small></div>
+          </div>
+        </div>
+      `)}` + footer();
+  }
+
+  // ---- Explorar ----
+  function filteredExplore() {
+    const query = state.query.trim().toLocaleLowerCase("es");
+    return watchPool()
+      .filter(a => (`${a.ticker} ${a.name}`.toLocaleLowerCase("es").includes(query))
+        && (state.filter === "todos"
+          || (state.filter === "acciones" && a.type === "Acción")
+          || (state.filter === "etf" && a.type === "ETF")
+          || (state.filter === "seguimiento" && state.watched.has(a.ticker))))
+      .sort(state.sort === "price"
+        ? (a,b) => (parseFloat(String(b.price).replace(/[^0-9.]/g,"")) || 0) - (parseFloat(String(a.price).replace(/[^0-9.]/g,"")) || 0)
+        : (a,b) => a.name.localeCompare(b.name, "es"));
+  }
+
+  function renderExploreResults() {
+    const host = document.getElementById("explore-results");
+    if (!host) return;
+    const result = filteredExplore();
+    host.innerHTML = result.length ? result.map(assetCard).join("") : `<section class="empty-state">${icon("search")}<h2>${state.filter === "seguimiento" && !state.query ? "Tu lista está esperando un comienzo." : "No encontramos coincidencias."}</h2><p>${state.filter === "seguimiento" && !state.query ? "Marca la estrella de un activo para seguirlo en este navegador." : "Prueba con otro nombre o ticker, o elimina los filtros."}</p><button class="btn" data-action="clear-filters">Ver todos los activos</button></section>`;
+    const status = document.getElementById("filter-status");
+    if (status) status.textContent = `${result.length} ${result.length === 1 ? "activo" : "activos"}${state.query ? ` para «${state.query}»` : ""}.`;
+    document.querySelectorAll("[data-filter]").forEach(el => el.setAttribute("aria-pressed", String(el.dataset.filter === state.filter)));
+    applyPrivacy();
+  }
+
+  function renderExplorar() {
+    main.innerHTML = intro(
+      "IDEAS PARA MIRAR, NO PARA PERSEGUIR",
+      "Explorar.",
+      "Un punto de partida para investigar; nunca una señal para actuar."
+    ) + `
+      <label class="sr-only" for="explore-search">Buscar por ticker o nombre</label><div class="search-field">${icon("search")}<input class="field" id="explore-search" type="search" maxlength="80" placeholder="Busca por ticker o nombre…" autocomplete="off" value="${escapeHtml(state.query)}"></div>
+      <div class="filters-row"><div class="tab-group" aria-label="Filtrar activos"><button class="tab-btn" data-action="filter" data-filter="todos" aria-pressed="true">Todos</button><button class="tab-btn" data-action="filter" data-filter="acciones" aria-pressed="false">Acciones</button><button class="tab-btn" data-action="filter" data-filter="etf" aria-pressed="false">ETF</button><button class="tab-btn" data-action="filter" data-filter="seguimiento" aria-pressed="false">Seguimiento</button></div><label class="sort-label" for="explore-sort">Ordenar<select class="sort-select" id="explore-sort"><option value="name" ${state.sort === "name" ? "selected" : ""}>Por nombre</option><option value="price" ${state.sort === "price" ? "selected" : ""}>Mayor precio</option></select></label></div>
+      <p class="filter-status" id="filter-status" role="status" aria-live="polite"></p>
+      <div class="explore-grid" id="explore-results"></div>` + footer();
+    renderExploreResults();
+  }
+
+  // ---- Hapi IA (Luna) ----
+  function renderMessages(scroll = false) {
+    const host = document.getElementById("chat-messages");
+    if (!host) return;
+    if (scroll) {
+      host.querySelectorAll("[data-typing]").forEach(n => n.remove());
+    } else host.replaceChildren();
+    const firstNew = scroll ? host.querySelectorAll("article.message").length : 0;
+    state.messages.slice(firstNew).forEach(message => {
+      const article = document.createElement("article");
+      article.className = `message ${message.role === "user" ? "user" : "assistant"}`;
+      const label = document.createElement("p");
+      label.className = "message-label";
+      label.textContent = message.role === "user" ? "Tú" : (isDemoMode() ? "Luna · Respuesta ilustrativa" : "Luna");
+      const body = document.createElement("p");
+      body.className = "message-body";
+      body.textContent = state.private ? message.text.replace(/(?:[+−])?(?:US)?\$[\d,.]+/g, "••••").replace(/[+−]?\d+(?:\.\d+)?%/g, "••••") : message.text;
+      article.append(label, body);
+      host.append(article);
+    });
+    if (state.lunaTyping) {
+      const article = document.createElement("article");
+      article.className = "message assistant";
+      article.dataset.typing = "1";
+      article.innerHTML = `<p class="message-label">Luna está pensando…</p><p class="message-body"><span class="typing"><i></i><i></i><i></i></span></p>`;
+      host.append(article);
+    }
+    if (scroll) host.scrollTo({top: host.scrollHeight, behavior: "auto"});
+  }
+
+  function renderAsistente() {
+    const isDemo = isDemoMode();
+    main.innerHTML = intro(
+      "HAPI IA",
+      "Buenas preguntas. Mejores fundamentos.",
+      "Una conversación para entender, no para predecir."
+    ) + `
+      <div class="conversation-layout">
+        <section class="card conversation" aria-labelledby="chat-heading">
+          <div class="chat-header"><span class="ai-avatar">${icon("sparkles")}</span><div><h2 id="chat-heading" style="font-size:18px">Luna, tu compañera de criterio</h2><p class="asset-sub">${isDemo ? "Modo demostración · respuestas ilustrativas" : "Asistente conectado · no opera ni predice"}</p></div></div>
+          <div class="chat-messages" id="chat-messages" role="log" aria-label="Conversación con Luna" aria-live="polite" aria-relevant="additions"></div>
+          <div class="chat-prompts" aria-label="Preguntas sugeridas"><button class="btn" data-action="chat-prompt" data-prompt="¿Qué riesgos tiene mi cartera?">¿Qué riesgos tiene mi cartera?</button><button class="btn" data-action="chat-prompt" data-prompt="Ayúdame antes de comprar">Ayúdame antes de comprar</button><button class="btn" data-action="chat-prompt" data-prompt="¿Qué significa diversificar?">¿Qué significa diversificar?</button></div>
+          <form class="chat-form" id="form-luna"><label class="sr-only" for="chat-input">Escribe tu pregunta para Luna</label><div class="composer"><textarea id="chat-input" rows="1" maxlength="500" placeholder="Escribe tu pregunta…"></textarea><button class="btn btn-primary" id="chat-send" type="submit" aria-label="Enviar pregunta" disabled>${icon("send")}</button></div><p class="chat-note">Luna propone preguntas y contexto; tú decides y operas en tu bróker.<br>Enter para enviar · Mayús + Enter para una nueva línea</p></form>
+        </section>
+        <aside class="card guide-card"><h2>Antes de decidir</h2><p>El contexto vale más que una respuesta rápida.</p>
+          <div class="guide-step"><span class="guide-step-number">1</span><div><strong>Entiende el activo</strong><p>Qué representa y de dónde viene su valor.</p></div></div>
+          <div class="guide-step"><span class="guide-step-number">2</span><div><strong>Reconoce el riesgo</strong><p>Qué podrías perder y qué exposición se repite.</p></div></div>
+          <div class="guide-step"><span class="guide-step-number">3</span><div><strong>Define tu horizonte</strong><p>Cuándo necesitarás el dinero y qué tolerancia tienes.</p></div></div>
+        </aside>
+      </div>` + footer();
+    renderMessages();
+    if (state.pendingPrompt) {
+      const text = state.pendingPrompt; state.pendingPrompt = ""; sendQuestion(text);
+    }
+  }
+
+  async function sendQuestion(text) {
+    const query = String(text || "").trim().slice(0, 500);
+    if (!query) return;
+    state.messages.push({role:"user", text:query});
+    state.lunaTyping = true;
+    renderMessages(true);
+    const input = document.getElementById("chat-input");
+    if (input) { input.value = ""; input.style.height = "44px"; input.focus(); }
+    const send = document.getElementById("chat-send");
+    if (send) send.disabled = true;
+
+    let reply = "";
+    if (state.connected) {
+      try {
+        const history = state.messages.slice(0, -1).slice(-8)
+          .map(m => ({role: m.role === "user" ? "user" : "assistant", content: m.text}));
+        const res = await fetch("/api/assistant/ask", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({question: query, history}),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          reply = data.answer || "";
+        }
+      } catch (err) {
+        console.warn("Luna fetch failed:", err);
+      }
+    }
+    if (!reply) {
+      if (query.toLowerCase().includes("riesgo")) {
+        reply = "Tu mayor exposición está en VOO y tecnología. Antes de cambiar algo, revisa si esa distribución sigue alineada con tu horizonte. Respuesta ilustrativa de demostración.";
+      } else {
+        reply = "Empecemos por tu objetivo, tu plazo y qué dato necesitarías para decidir. Esta respuesta es ilustrativa; conecta el asistente para un análisis personalizado.";
+      }
+    }
+    state.lunaTyping = false;
+    state.messages.push({role:"luna", text:reply});
+    renderMessages(true);
+  }
+
+  // ---- Movimientos ----
+  function flowRowAmount(row) {
+    const meta = FLOW_META[row.kind] || {label: row.kind, icon: "activity", sign: 0};
+    if (row.kind === "ahorro_soles") return {main: `+${soles(row.soles_amount || 0)}`, sub: "alcancía"};
+    const usd = row.amount_usd;
+    const sol = row.soles_amount;
+    if (usd != null) {
+      let sub = "";
+      if (sol != null) sub = soles(sol) + (row.fx_rate ? ` · tc ${Number(row.fx_rate).toFixed(2)}` : "");
+      return {main: `${meta.sign >= 0 ? "+" : "−"}${money(usd)}`, sub};
+    }
+    if (sol != null) return {main: `${meta.sign >= 0 ? "+" : "−"}${soles(sol)}`, sub: "sin dato en USD"};
+    return {main: "Sin dato", sub: ""};
+  }
+
+  function flowsListHtml() {
+    const rows = state.flows;
+    if (!rows.length) {
+      return `<section class="empty-state">${icon("activity")}<h2>Sin movimientos todavía.</h2><p>Cuenta un depósito, un retiro, un dividendo o un ahorro, o pega tu historial de Hapi.</p></section>`;
+    }
+    return `<section class="card activity-card" aria-label="Historial de movimientos">${rows.map(row => {
+      const meta = FLOW_META[row.kind] || {label: row.kind, icon: "activity", sign: 0};
+      const amt = flowRowAmount(row);
+      const detail = `${row.at || ""}${row.source ? " · " + (FLOW_SOURCE[row.source] || row.source) : ""}`;
+      return `<article class="activity-row"><span class="activity-icon">${icon(meta.icon)}</span><div class="activity-info"><strong>${escapeHtml(meta.label)}</strong><p>${escapeHtml(detail)}</p></div><div class="activity-amount ${meta.sign > 0 ? "positive" : ""}">${privateText(amt.main)}<span>${escapeHtml(amt.sub)}</span></div><button class="icon-btn" data-action="delete-flow" data-id="${row.id}" aria-label="Eliminar movimiento">${icon("trash","icon-sm")}</button></article>`;
+    }).join("")}</section>`;
+  }
+
+  function flowDraftHtml() {
+    if (!state.flowDraft) return "";
+    const d = state.flowDraft;
+    const dupCount = d.rows.filter(r => r.posible_duplicado).length;
+    return `<div class="draft-card" style="margin:0 24px 20px">
+      <strong>Revisa cada fila antes de guardar</strong>
+      <table class="data-table"><thead><tr><th>Movimiento</th><th>Fecha</th><th style="text-align:right">Importe</th></tr></thead><tbody>
+        ${d.rows.map(r => { const meta = FLOW_META[r.kind] || {label: r.kind}; const amt = flowRowAmount(r); return `<tr><td>${escapeHtml(meta.label)}${r.posible_duplicado ? ' <span class="badge badge-demo">posible duplicado</span>' : ""}</td><td>${escapeHtml(r.at || "")}</td><td>${privateText(amt.main)}</td></tr>`; }).join("")}
+      </tbody></table>
+      ${d.omitted && d.omitted.length ? `<p class="hint" style="margin-top:10px">Se omitieron ${d.omitted.length} líneas que no parecen movimientos de dinero.</p>` : ""}
+      ${dupCount ? `<p class="settings-warning">Hay ${dupCount} ${dupCount === 1 ? "movimiento" : "movimientos"} que parecen ya registrados.<label class="check-line" style="margin-top:8px"><input type="checkbox" id="check-flow-dup" ${state.flowAllowDup ? "checked" : ""}/> Confirmar también los duplicados</label></p>` : ""}
+      <label class="check-line" style="margin-top:12px"><input type="checkbox" id="check-flow-reviewed" ${state.flowReviewed ? "checked" : ""}/> Revisé cada importe</label>
+      <div class="dialog-actions"><button type="button" class="btn" data-action="cancel-flow-draft">Cancelar</button><button type="button" class="btn btn-primary" data-action="confirm-flow-draft" ${!state.flowReviewed || state.flowBusy ? "disabled" : ""}>Guardar ${d.rows.length} ${d.rows.length === 1 ? "movimiento" : "movimientos"}</button></div>
+    </div>`;
+  }
+
+  function renderMovimientos() {
+    const isDemo = isDemoMode();
+    main.innerHTML = intro(
+      "MOVIMIENTOS",
+      "La historia detrás del saldo.",
+      "Registra lo que ya ocurrió en tu bróker o tu alcancía. Aquí nada se ejecuta."
+    ) + `
+      <div class="notice" style="margin-bottom:24px">${icon("shield")}<p>Registrar no es operar: anotas depósitos, retiros, dividendos y ahorros para que tu marcador sea real. Las compras y ventas se registran como posiciones en Mi cartera.</p></div>
+      <section class="card" style="margin-bottom:24px" aria-label="Registrar un movimiento">
+        <div class="section-header"><div class="section-title"><h2>Registrar un movimiento</h2><p class="small muted">Cuéntalo en una frase o pega tu historial de Hapi.</p></div></div>
+        <form class="section-pad" id="form-flow" style="padding-top:0">
+          <label class="sr-only" for="flow-text">Movimiento o historial</label>
+          <textarea class="field" id="flow-text" rows="2" maxlength="4000" placeholder="Ej. guardé 80 soles · deposité 480 soles y llegaron 132.50 · entré a Hapi">${escapeHtml(state.flowText)}</textarea>
+          <div class="dialog-actions"><button class="btn btn-primary" type="submit" ${state.flowBusy ? "disabled" : ""}>${icon("plus")}Preparar movimiento</button><span class="small muted">${isDemo ? "En demo se interpreta localmente." : "Nada se guarda sin tu revisión."}</span></div>
+        </form>
+        ${flowDraftHtml()}
+      </section>
+      <section aria-label="Movimientos registrados">
+        <div class="section-header" style="padding-left:0;padding-right:0"><div class="section-title"><h2>Tus movimientos</h2><p class="small muted">${isDemo ? "Historial ilustrativo" : "Ordenados del más reciente al más antiguo"}</p></div><span class="badge badge-muted">${state.flows.length}</span></div>
+        ${flowsListHtml()}
+      </section>` + footer();
+  }
+
+  // ---- Mi diario ----
+  function renderDiario() {
+    main.innerHTML = intro(
+      "TU PROCESO TAMBIÉN CUENTA",
+      "Mi diario.",
+      "El resultado cuenta una parte. Tus razones cuentan el resto."
+    ) + `
+      <div class="journal-layout">
+        <section class="card journal-form">
+          <span class="eyebrow">UNA DECISIÓN CONSCIENTE</span>
+          <h2 style="margin-top:8px">Escribe antes de actuar</h2>
+          <p class="subtext" style="margin-top:8px">Tu yo del futuro agradecerá saber por qué decidiste esto.</p>
+          <form class="form-stack" id="form-journal">
+            <div class="field-pair">
+              <label class="field-label">Activo<input class="field" id="journal-ticker" value="${escapeHtml(state.journalTicker)}" placeholder="Ticker" maxlength="10"/></label>
+              <label class="field-label">Decisión
+                <select class="field" id="journal-action">
+                  <option ${state.journalAction === "Comprar" ? "selected" : ""}>Comprar</option>
+                  <option ${state.journalAction === "Vender" ? "selected" : ""}>Vender</option>
+                  <option ${state.journalAction === "Mantener" ? "selected" : ""}>Mantener</option>
+                  <option ${state.journalAction === "Observar" ? "selected" : ""}>Observar</option>
+                </select>
+              </label>
+            </div>
+            <label class="field-label">¿Cuál es tu tesis?<textarea class="field" id="journal-thesis" placeholder="Creo que… porque…">${escapeHtml(state.journalThesis)}</textarea></label>
+            <label class="field-label">¿Cuál es el riesgo principal?<textarea class="field" id="journal-risk" placeholder="Podría estar equivocado si…">${escapeHtml(state.journalRisk)}</textarea></label>
+            <label class="field-label">¿Qué invalidaría tu idea?<textarea class="field" id="journal-invalidation" placeholder="Cambiaría de opinión cuando…">${escapeHtml(state.journalInvalidation)}</textarea></label>
+            <button class="btn btn-primary" type="submit">Guardar reflexión ${icon("arrow")}</button>
+          </form>
+        </section>
+        <aside class="quote-card"><div class="quote-mark">“</div><blockquote>Una buena decisión no siempre lleva a un buen resultado. Y un buen resultado no siempre significa que decidiste bien.</blockquote><span>SEPARA EL PROCESO DE LA SUERTE</span></aside>
+      </div>
+
+      <section class="card mt-24" aria-label="Decisiones anteriores">
+        <div class="section-header"><div class="section-title"><h2>Decisiones anteriores</h2><p class="small muted">Mira hacia atrás para avanzar.</p></div><span class="badge badge-muted">${state.entries.length} ${state.entries.length === 1 ? "ENTRADA" : "ENTRADAS"}</span></div>
+        <div class="entry-list">
+          ${state.entries.length ? state.entries.map(e => `
+            <article class="entry-row">
+              <span class="entry-date">${escapeHtml(e.date)}</span>
+              <div>
+                <div class="entry-title"><strong>${escapeHtml(e.ticker)}</strong>${badge(e.action.toUpperCase(), e.action === "Comprar" ? "green" : e.action === "Vender" ? "red" : "muted")}${e.amount > 0 ? `<span class="small muted">${privateText(money(e.amount))}</span>` : ""}</div>
+                <p>${escapeHtml(e.thesis)}</p>
+                <small class="entry-meta"><b>Riesgo:</b> ${escapeHtml(e.risk)}</small>
+                <small class="entry-meta"><b>Invalidación:</b> ${escapeHtml(e.invalidation)}</small>
+                ${e.lesson ? `<small class="entry-meta"><b>Aprendizaje:</b> ${escapeHtml(e.lesson)}</small>` : ""}
+                ${state.journalReviewId === e.id ? `
+                  <div class="review-box">
+                    <label>¿Qué aprendiste? ¿Fue proceso o suerte?<textarea class="field" id="review-lesson" placeholder="Mi aprendizaje…">${escapeHtml(state.journalLesson)}</textarea></label>
+                    <button type="button" class="btn btn-primary" data-action="save-review" id="btn-save-review" ${!state.journalLesson.trim() ? "disabled" : ""}>Guardar evaluación</button>
+                  </div>` : `
+                  <button type="button" class="btn btn-plain" data-action="eval-entry" data-eval-id="${e.id}">Evaluar esta decisión ${icon("arrow","icon-sm")}</button>`}
+              </div>
+            </article>`).join("") : `<div class="empty-state" style="border:0">${icon("book")}<h2>Todavía no hay decisiones escritas.</h2><p>Tu primera reflexión puede empezar arriba, o desde un análisis guardado.</p></div>`}
+        </div>
+      </section>` + footer();
+  }
+
+  // ---- Ajustes ----
+  function renderAjustes() {
+    const conflict = Number(state.settingsLimit) < 100 / (Number(state.settingsPositions) || 1);
+    const isDemo = isDemoMode();
+    main.innerHTML = intro(
+      "TU PLAN, TUS REGLAS",
+      "Ajustes.",
+      "Define los límites que te ayudan a decidir a tu manera."
+    ) + `
+      <section class="card section-pad" aria-label="Perfil de inversión">
+        <span class="eyebrow">TU PUNTO DE PARTIDA</span>
+        <h2 style="margin:8px 0 20px">Perfil de inversión</h2>
+        <div class="settings-row"><div><h3>Tolerancia al riesgo</h3><p>Elige lo que mejor describe cómo te sientes ante las fluctuaciones.</p></div>
+          <select class="sort-select" id="settings-risk" aria-label="Tolerancia al riesgo">
+            <option value="conservador" ${state.settingsRisk === "conservador" ? "selected" : ""}>Conservador</option>
+            <option value="moderado" ${state.settingsRisk === "moderado" ? "selected" : ""}>Moderado</option>
+            <option value="agresivo" ${state.settingsRisk === "agresivo" ? "selected" : ""}>Agresivo</option>
+          </select></div>
+        <div class="settings-row"><div><h3>Máximo por empresa</h3><p>Evita que una sola posición domine tu cartera.</p></div>
+          <div class="settings-number"><input type="number" min="1" max="100" id="settings-limit" value="${escapeHtml(state.settingsLimit)}" aria-label="Máximo por empresa en porcentaje"/>%</div></div>
+        <div class="settings-row"><div><h3>Posiciones objetivo</h3><p>El número de activos que quieres mantener aproximadamente.</p></div>
+          <div class="settings-number"><input type="number" min="1" max="100" id="settings-positions" value="${escapeHtml(state.settingsPositions)}" aria-label="Número de posiciones objetivo"/></div></div>
+        ${conflict ? `<div class="settings-warning">Con ${escapeHtml(state.settingsPositions)} posiciones, un límite de ${escapeHtml(state.settingsLimit)}% no permite distribuir el 100% de la cartera. Considera ajustar uno de los valores.</div>` : ""}
+        <div class="settings-save"><button type="button" class="btn btn-primary" data-action="save-settings">Guardar preferencias ${icon("arrow")}</button>${state.settingsSaved ? `<span>${icon("check","icon-sm")} Guardado</span>` : ""}</div>
+      </section>
+
+      <section class="card section-pad mt-24" aria-label="Sobre tus datos">
+        <span class="eyebrow">TRANSPARENCIA PRIMERO</span>
+        <h2 style="margin:8px 0 20px">Sobre tus datos</h2>
+        <div class="settings-row"><div><h3>${isDemo ? "Datos ilustrativos, siempre identificados" : "Datos guardados, siempre con fuente"}</h3><p>${isDemo ? "En modo demo, las cifras no pertenecen a una cuenta real. Un error de servidor nunca se reemplaza silenciosamente por datos ficticios." : "Las cifras provienen de tus datos guardados y de Yahoo/SEC con fecha. Si un dato falta, se marca «Sin dato»."}</p></div>${badge(isDemo ? "MODO DEMO" : "DATOS REALES", isDemo ? "demo" : "green")}</div>
+        <div class="settings-row"><div><h3>Conexión con el backend</h3><p>${isDemo ? "Las acciones de esta demo se mantienen solo en esta sesión." : "Conectado al backend local: los cambios se guardan en tu base de datos."}</p></div>${badge(state.connected ? "CONECTADO" : "MODO LOCAL", state.connected ? "green" : "muted")}</div>
+      </section>
+
+      ${isDemo ? `
+        <section class="danger-zone"><div><span class="eyebrow">ZONA DE CONTROL</span><h2>Volver a empezar</h2><p>Restablece todos los datos de demostración a su estado inicial.</p></div><button type="button" class="btn btn-danger" data-action="open-reset">Restablecer demo</button></section>
+      ` : `
+        <section class="danger-zone" style="border-color:var(--border)"><div><span class="eyebrow" style="color:var(--muted)">ZONA DE CONTROL</span><h2>Actualizar tus datos</h2><p>Vuelve a leer la cartera, el marcador y el diario desde el backend local.</p></div><button type="button" class="btn" data-action="refresh-data">${icon("refresh")}Actualizar datos</button></section>
+      `}` + footer();
+  }
+
+  // ---- Diálogos ----
+  const openDialog = (title, content) => {
+    document.getElementById("dialog-title").textContent = title;
+    dialogBody.innerHTML = content;
+    hydrateIcons(dialogBody);
+    applyPrivacy();
+    if (!dialog.open) dialog.showModal();
+  };
+
+  function openPosition(ticker) {
+    const a = state.assets.find(item => item.ticker === ticker);
+    if (!a) return;
+    const value = round(a.shares * a.price), gain = round(value - a.cost);
+    const isDemo = isDemoMode();
+    const statusTag = isDemo ? badge("HECHO · DEMO", "demo") : (a.priceStatus === "actual" || a.priceStatus === "reciente" ? badge("HECHO", "green") : badge("POR VERIFICAR", "demo"));
+    openDialog("Detalle del activo", `
+      ${assetLabel(a.ticker, a.name, monoTone(a.ticker, a.type || assetType(a.ticker)))}
+      <span class="badge ${a.type === "ETF" ? "badge-purple" : "badge-blue"}">${a.type || assetType(a.ticker)}</span>
+      <dl class="detail-metrics">
+        <div class="detail-metric"><dt>Precio utilizado</dt><dd>${privateText(money(a.price))}</dd></div>
+        <div class="detail-metric"><dt>Resultado de la posición</dt><dd class="${gain >= 0 ? "positive" : "negative"}">${privateText((gain >= 0 ? "+" : "−") + money(Math.abs(gain)))}</dd></div>
+        <div class="detail-metric"><dt>En la cartera</dt><dd>${a.shares} unidades</dd></div>
+        <div class="detail-metric"><dt>Valor de la posición</dt><dd>${privateText(money(value))}</dd></div>
+      </dl>
+      <table class="data-table"><tbody>
+        <tr><th>Costo registrado</th><td>${a.cost ? privateText(money(a.cost)) : "Sin dato"}</td></tr>
+        <tr><th>Origen y fecha</th><td>${a.priceFuente ? escapeHtml(a.priceFuente) + (a.priceAsof ? " · " + String(a.priceAsof).slice(0,10) : "") : "Referencia ilustrativa"}</td></tr>
+        <tr><th>Estado</th><td>${isDemo ? "Sincronización por verificar" : (a.verified ? "Verificado por ti" : "Pendiente de verificación")}</td></tr>
+      </tbody></table>
+      <p class="detail-flag">${icon("info")} Los niveles ATR requieren precios de mercado verificados. ${statusTag}</p>
+      <div class="dialog-actions"><button class="btn" data-action="watch" data-ticker="${escapeHtml(a.ticker)}" aria-pressed="${state.watched.has(a.ticker)}">${icon(state.watched.has(a.ticker) ? "check" : "star")}${state.watched.has(a.ticker) ? "En seguimiento" : "Añadir a seguimiento"}</button><button class="btn btn-primary" data-action="analyze" data-ticker="${escapeHtml(a.ticker)}">${icon("sliders")}Simular decisión</button><button class="btn" data-action="prompt" data-prompt="¿Qué me puedes decir de ${escapeHtml(a.ticker)} en mi cartera?">${icon("sparkles")}Preguntar a Luna</button></div>`);
+  }
+
+  function openRadarAsset(ticker) {
+    const r = state.radar.find(item => item.ticker === ticker) || watchPool().find(item => item.ticker === ticker);
+    if (!r) return;
+    const type = assetType(ticker, r.sector || "");
+    openDialog("Detalle del activo", `
+      ${assetLabel(ticker, r.name, monoTone(ticker, type))}
+      <span class="badge ${type === "ETF" ? "badge-purple" : "badge-blue"}">${type}</span>
+      ${r.verdict ? ` <span class="badge ${r.tone === "green" ? "badge-green" : r.tone === "orange" ? "badge-demo" : "badge-muted"}">${escapeHtml(r.verdict)}</span>` : ""}
+      <dl class="detail-metrics">
+        <div class="detail-metric"><dt>Precio de referencia</dt><dd>${privateText(r.price || "Sin dato")}</dd></div>
+        <div class="detail-metric"><dt>Sector</dt><dd style="font-size:16px">${escapeHtml(r.sector || "Sin clasificar")}</dd></div>
+      </dl>
+      ${r.note ? `<p class="detail-note">${escapeHtml(r.note)}</p>` : ""}
+      <p class="detail-note">El veredicto es una invitación a hacer mejores preguntas, no una recomendación de compra o venta.</p>
+      <div class="dialog-actions"><button class="btn" data-action="watch" data-ticker="${escapeHtml(ticker)}" aria-pressed="${state.watched.has(ticker)}">${icon(state.watched.has(ticker) ? "check" : "star")}${state.watched.has(ticker) ? "En seguimiento" : "Añadir a seguimiento"}</button><button class="btn btn-primary" data-action="analyze" data-ticker="${escapeHtml(ticker)}">${icon("sliders")}Simular decisión</button><button class="btn" data-action="prompt" data-prompt="¿Qué me puedes decir de ${escapeHtml(ticker)}?">${icon("sparkles")}Preguntar a Luna</button></div>`);
+  }
+
+  function searchResults(query) {
+    const normalized = String(query || "").trim().toLocaleLowerCase("es");
+    const list = watchPool().filter(a => `${a.ticker} ${a.name}`.toLocaleLowerCase("es").includes(normalized)).slice(0, 6);
+    const host = document.getElementById("quick-results");
+    if (!host) return;
+    host.innerHTML = list.length ? list.map(a => `<button class="quick-result" data-action="${a.src === "posicion" ? "asset" : "radar-asset"}" data-ticker="${escapeHtml(a.ticker)}" aria-label="Ver detalle de ${escapeHtml(a.ticker)}, ${escapeHtml(a.name)}">${assetLabel(a.ticker, a.name, monoTone(a.ticker, a.type || assetType(a.ticker)))}<span class="quick-result-price">${privateText(a.price)}</span></button>`).join("") : `<p class="muted small" role="status" style="padding:16px 0">No hay coincidencias entre tus posiciones y el radar.</p>`;
+    applyPrivacy();
+  }
+
+  const openSearch = () => {
+    openDialog("Buscar un activo", `<label class="search-dialog-label" for="global-search">Nombre o ticker del activo</label><input class="field" id="global-search" type="search" placeholder="Por ejemplo, VOO o Microsoft…" maxlength="80" autocomplete="off"><div class="quick-results" id="quick-results"></div><p class="detail-note">Busca entre tus posiciones y los activos del radar.</p>`);
+    searchResults("");
+    document.getElementById("global-search").focus();
+  };
+
+  const about = () => openDialog("Criterio con datos, no adivinanzas", `
+    <span class="badge ${isDemoMode() ? "badge-demo" : "badge-green"}">${isDemoMode() ? "Modo demostración" : "Conectado al backend local"}</span>
+    <p>Hapi IA te ayuda a pensar mejor tus decisiones de inversión. Propone y registra; nunca ejecuta operaciones en tu bróker.</p>
+    <ul class="about-list">
+      <li><strong>Cifras:</strong> todo dato lleva fuente y fecha. Si falta, se marca «Sin dato»; nunca se inventa.</li>
+      <li><strong>Precios:</strong> Yahoo Finance o ingreso manual con tu verificación. Si Yahoo falla, se te avisa.</li>
+      <li><strong>Fundamentales:</strong> reportes 10-K desde SEC EDGAR, sin mezclar presentaciones.</li>
+      <li><strong>Luna:</strong> la asistente explica y cuestiona; no recomienda comprar ni vender ni predice precios.</li>
+      <li><strong>Privacidad:</strong> tema, seguimiento y ocultación se guardan solo en este navegador. La conversación no se guarda.</li>
+    </ul>
+    <div class="notice">${icon("shield")}<p>Nada de lo que ves es asesoría financiera ni una orden. Tú decides y operas en tu bróker.</p></div>`);
+
+  const openReset = () => openDialog("¿Restablecer la demostración?", `
+    <div class="detail-flag"><span class="ai-avatar">${icon("refresh")}</span><p style="margin:0">Se restaurarán la cartera, el diario, los movimientos y la alcancía a sus valores iniciales. Esto no afecta ninguna cuenta real.</p></div>
+    <div class="dialog-actions"><button class="btn" data-action="close-dialog">Cancelar</button><button class="btn btn-danger" data-action="confirm-reset">Restablecer datos</button></div>`);
+
+  // ---- Utilidades de vista ----
+  const toast = text => {
+    clearTimeout(toastTimer);
+    document.getElementById("toast-text").textContent = text;
+    document.getElementById("toast").classList.add("show");
+    toastTimer = setTimeout(() => document.getElementById("toast").classList.remove("show"), 5500);
+  };
+
+  const applyTheme = () => {
+    document.documentElement.dataset.theme = state.theme;
+    document.querySelector('meta[name="theme-color"]').content = state.theme === "dark" ? "#171c19" : "#102c26";
+    document.getElementById("theme-label").textContent = state.theme === "dark" ? "Tema claro" : "Tema oscuro";
+    document.getElementById("theme-button").querySelector("[data-icon]").dataset.icon = state.theme === "dark" ? "sun" : "moon";
+    hydrateIcons(document.getElementById("theme-button"));
+  };
+
+  function applyPrivacy() {
+    document.querySelectorAll("[data-private]").forEach(el => {
+      el.textContent = state.private ? "••••" : el.dataset.value;
+      if (state.private) el.setAttribute("aria-label", "Importe oculto"); else el.removeAttribute("aria-label");
+    });
+    document.querySelectorAll('[data-action="privacy"]').forEach(el => {
+      el.setAttribute("aria-pressed", String(state.private));
+      el.setAttribute("aria-label", `${state.private ? "Mostrar" : "Ocultar"} importes`);
+      if (el.id === "privacy-button") el.innerHTML = icon(state.private ? "eyeoff" : "eye");
+      else if (el.closest(".intro-actions")) el.innerHTML = `${icon(state.private ? "eyeoff" : "eye")}<span>${state.private ? "Mostrar" : "Ocultar"} importes</span>`;
+    });
+  }
+
+  const refreshWatchButtons = () => {
+    document.querySelectorAll('[data-action="watch"]').forEach(btn => {
+      const watched = state.watched.has(btn.dataset.ticker);
+      btn.setAttribute("aria-pressed", String(watched));
+      btn.setAttribute("aria-label", `${watched ? "Quitar" : "Añadir"} ${btn.dataset.ticker} ${watched ? "de" : "a"} seguimiento`);
+      if (btn.classList.contains("btn")) btn.innerHTML = `${icon(watched ? "check" : "star")}${watched ? "En seguimiento" : "Añadir a seguimiento"}`;
+    });
+    const count = document.getElementById("watch-count");
+    if (count) count.textContent = `(${state.watched.size})`;
+  };
+
+  const toggleWatch = ticker => {
+    if (!ticker) return;
+    const wasWatched = state.watched.has(ticker);
+    wasWatched ? state.watched.delete(ticker) : state.watched.add(ticker);
+    const saved = savePreferences();
+    refreshWatchButtons();
+    if (state.route === "explorar") renderExploreResults();
+    if (state.route === "cartera" && state.walletTab === "seguimiento") renderWalletContent();
+    toast(`${ticker} ${wasWatched ? "se quitó de" : "se añadió a"} seguimiento.${saved ? " Guardado en este navegador." : " Disponible durante esta sesión."}`);
+  };
+
+  const exportCsv = () => {
+    const isDemo = isDemoMode();
+    const rows = [["Activo","Nombre","Tipo","Unidades","Precio_utilizado_USD","Valor_USD","Costo_USD","Resultado_no_realizado_USD","Origen","Fecha"],
+      ...state.assets.map(a => [a.ticker, a.name, a.type || assetType(a.ticker), a.shares, a.price.toFixed(2), (a.shares*a.price).toFixed(2), a.cost.toFixed(2), (a.shares*a.price - a.cost).toFixed(2), a.priceFuente || (isDemo ? "EJEMPLO" : ""), a.priceAsof || ""]),
+      ["CASH","Saldo disponible","Efectivo","","", state.cash.toFixed(2),"","", "", ""]];
+    const content = "\uFEFF" + rows.map(row => row.map(cell => `"${String(cell).replaceAll('"','""')}"`).join(",")).join("\r\n");
+    const url = URL.createObjectURL(new Blob([content], {type:"text/csv;charset=utf-8"}));
+    const link = document.createElement("a"); link.href = url; link.download = "hapi-cartera.csv"; link.hidden = true; document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    toast("CSV de tu cartera preparado. Incluye los importes aunque estén ocultos.");
+  };
+
+  // ---- Menú móvil ----
+  const setMenuState = () => {
+    sidebar.inert = mobileQuery.matches && !menuOpen;
+    if (mobileQuery.matches && !menuOpen) sidebar.setAttribute("aria-hidden","true"); else sidebar.removeAttribute("aria-hidden");
+    document.getElementById("menu-button").setAttribute("aria-expanded", String(menuOpen));
+  };
+  const openMenu = () => {
+    if (!mobileQuery.matches) return;
+    menuOpen = true; document.body.classList.add("sidebar-open"); document.body.style.overflow = "hidden"; setMenuState();
+    sidebar.querySelector(".sidebar-close").focus();
+  };
+  function closeMenu(returnFocus = true) {
+    const wasOpen = menuOpen;
+    menuOpen = false; document.body.classList.remove("sidebar-open"); document.body.style.overflow = ""; setMenuState();
+    if (returnFocus && wasOpen) document.getElementById("menu-button").focus();
+  }
+
+  // ---- Enrutado ----
+  const aliases = {inicio:"resumen", hoy:"resumen", cartera:"cartera", portfolio:"cartera", oportunidades:"explorar", radar:"explorar", asistente:"asistente", luna:"asistente", analisis:"analisis", operar:"analisis", diario:"diario", historial:"diario", ajustes:"ajustes", perfil:"ajustes", config:"ajustes", movimientos:"movimientos", flows:"movimientos"};
+  function routeFromHash() {
+    const rawHash = (location.hash || "").replace(/^#/, "").split("?")[0];
+    const [raw, arg = ""] = rawHash.split("/");
+    const page = Object.hasOwn(routeLabels, raw) ? raw : (aliases[raw] || "resumen");
+    return {page, arg};
+  }
+
+  const views = {resumen:renderResumen, cartera:renderCartera, analisis:renderAnalisis, explorar:renderExplorar, asistente:renderAsistente, movimientos:renderMovimientos, diario:renderDiario, ajustes:renderAjustes};
+
+  let lastRouteKey = "";
+  const renderRoute = (focus = false) => {
+    const r = routeFromHash();
+    state.route = r.page;
+    const routeKey = `${r.page}/${r.arg}`;
+    if (routeKey !== lastRouteKey) {
+      lastRouteKey = routeKey;
+      if (r.arg) { state.analysisTicker = r.arg.toUpperCase(); state.analysisShow = false; }
+    }
+    if (state.loading) {
+      main.innerHTML = `<div class="connection"><div class="connection-icon"><span class="spin" style="display:grid">${icon("refresh","icon-lg")}</span></div><h1>Cargando tu espacio…</h1><p>Conectando con tus datos locales.</p></div>`;
+      return;
+    }
+    // Conservar foco y caret entre repintados para que escribir no se sienta inestable.
+    const prev = document.activeElement;
+    const focusId = prev && prev.id && main.contains(prev) ? prev.id : "";
+    const sel = focusId && typeof prev.selectionStart === "number" ? [prev.selectionStart, prev.selectionEnd] : null;
+
+    views[state.route]();
+    hydrateIcons(main);
+    document.getElementById("crumb-current").textContent = routeLabels[state.route];
+    document.querySelectorAll(".nav-link,[data-route].side-action").forEach(a => {
+      if (a.dataset.route === state.route) a.setAttribute("aria-current","page"); else a.removeAttribute("aria-current");
+    });
+    document.title = `${routeLabels[state.route]} · Hapi IA`;
+    applyPrivacy();
+    closeMenu(false);
+    if (focus) { window.scrollTo({top:0, behavior:"auto"}); main.focus({preventScroll:true}); }
+    else if (focusId) {
+      const el = document.getElementById(focusId);
+      if (el) {
+        el.focus({preventScroll:true});
+        if (sel && typeof el.setSelectionRange === "function") {
+          try { el.setSelectionRange(Math.min(sel[0], el.value.length), Math.min(sel[1], el.value.length)); } catch (e) { /* inputs numéricos sin caret */ }
+        }
+      }
+    }
+  };
+
+  const navigate = (route, arg = "") => {
+    const hash = `#${route}${arg ? "/" + arg : ""}`;
+    if (location.hash === hash) renderRoute(true); else location.hash = route + (arg ? "/" + arg : "");
+  };
+
+  // ---- Acciones con persistencia ----
+  async function saveJournalEntry(entry) {
+    if (!state.connected) return;
+    try {
+      const res = await fetch("/api/journal", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ticker: entry.ticker, action: String(entry.action || "revision").toLowerCase(), tesis: entry.thesis, riesgos: entry.risk, condicion_invalidacion: entry.invalidation}),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.id) entry.id = data.id;
+      }
+    } catch (err) {
+      console.warn("No se pudo guardar la entrada del diario:", err);
+    }
+  }
+
+  async function saveSavingsDraft() {
+    const n = state.homeDraft;
+    state.savings += n;
+    state.homeDraft = null;
+    state.homeSavingText = "";
+    toast("Aporte registrado en tu alcancía.");
+    if (state.connected) {
+      try {
+        const dRes = await fetch("/api/flows/draft", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({text:`guarde ${n} soles`})});
+        if (dRes.ok) {
+          const draftData = await dRes.json();
+          if (Array.isArray(draftData.rows) && draftData.rows.length) {
+            await fetch("/api/flows/confirm", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({rows: draftData.rows, reviewed: true})});
+            const fRes = await fetch("/api/flows").catch(() => null);
+            if (fRes && fRes.ok) { const fd = await fRes.json(); if (fd && Array.isArray(fd.rows)) state.flows = fd.rows; }
+            const mRes = await fetch("/api/marcador").catch(() => null);
+            if (mRes && mRes.ok) state.serverMarcador = await mRes.json();
+          }
+        }
+      } catch (err) {
+        console.warn("Error guardando flujo en backend:", err);
+      }
+    }
+    renderRoute();
+  }
+
+  function demoFlowDraft(text) {
+    const t = text.toLowerCase();
+    const m = text.replace(",", ".").match(/\d+(?:\.\d{1,2})?/);
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = [];
+    if (!m || Number(m[0]) <= 0) return null;
+    if (/ahorr|guard/.test(t)) rows.push({kind:"ahorro_soles", soles_amount:Number(m[0]), amount_usd:null, at:today, source:"texto"});
+    else if (/deposit|abon|ingres/.test(t)) rows.push({kind:"deposito", amount_usd:Number(m[0]), soles_amount:null, at:today, source:"texto"});
+    else if (/retir/.test(t)) rows.push({kind:"retiro", amount_usd:Number(m[0]), soles_amount:null, at:today, source:"texto"});
+    else if (/dividend/.test(t)) rows.push({kind:"dividendo", amount_usd:Number(m[0]), soles_amount:null, at:today, source:"texto"});
+    else return null;
+    return {rows, omitted: []};
+  }
+
+  async function requestFlowDraft() {
+    const text = state.flowText.trim();
+    if (!text) return;
+    state.flowBusy = true;
+    if (isDemoMode()) {
+      const d = demoFlowDraft(text);
+      state.flowBusy = false;
+      if (d) { state.flowDraft = d; state.flowReviewed = false; state.flowAllowDup = false; }
+      else toast("No entendí el movimiento. Prueba con «guardé 80 soles» o «deposité 100».");
+      renderRoute();
+      return;
+    }
+    try {
+      const res = await fetch("/api/flows/draft", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({text})});
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data.rows) && data.rows.length) {
+        state.flowDraft = {rows: data.rows, omitted: data.omitted || []};
+        state.flowReviewed = false;
+        state.flowAllowDup = false;
+      } else {
+        const msg = data && data.detail && typeof data.detail === "object" ? (data.detail.message || "") : (typeof data.detail === "string" ? data.detail : "");
+        toast(msg || "No entendí el mensaje. Cuéntalo en una frase o pega tu historial.");
+      }
+    } catch (err) {
+      console.warn("Error pidiendo borrador:", err);
+      toast("No se pudo preparar el borrador. Inténtalo de nuevo.");
+    }
+    state.flowBusy = false;
+    renderRoute();
+  }
+
+  async function confirmFlowDraft() {
+    if (!state.flowDraft) return;
+    state.flowBusy = true;
+    if (isDemoMode()) {
+      const nextId = Math.max(0, ...state.flows.map(f => f.id || 0)) + 1;
+      const rows = state.flowDraft.rows.map((r, i) => ({...r, id: nextId + i}));
+      state.flows = [...rows, ...state.flows];
+      const saved = rows.reduce((s, r) => s + (r.kind === "ahorro_soles" ? (r.soles_amount || 0) : 0), 0);
+      if (saved) state.savings += saved;
+      state.flowDraft = null; state.flowText = ""; state.flowBusy = false;
+      toast("Movimiento registrado en esta sesión de demostración.");
+      renderRoute();
+      return;
+    }
+    try {
+      const res = await fetch("/api/flows/confirm", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({rows: state.flowDraft.rows, reviewed: true, allow_duplicates: state.flowAllowDup})});
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        state.flowDraft = null; state.flowText = ""; state.flowBusy = false;
+        toast(`Se ${data.imported === 1 ? "guardó 1 movimiento" : `guardaron ${data.imported} movimientos`}.`);
+        const [fRes, mRes] = await Promise.all([fetch("/api/flows").catch(() => null), fetch("/api/marcador").catch(() => null)]);
+        if (fRes && fRes.ok) { const fd = await fRes.json(); if (fd && Array.isArray(fd.rows)) state.flows = fd.rows; }
+        if (mRes && mRes.ok) state.serverMarcador = await mRes.json();
+        if (state.serverMarcador && state.serverMarcador.alcancia && typeof state.serverMarcador.alcancia.progreso === "number") state.savings = state.serverMarcador.alcancia.progreso;
+        renderRoute();
+        return;
+      }
+      if (res.status === 400 && data && data.detail && Array.isArray(data.detail.duplicates)) {
+        state.flowAllowDup = true;
+        toast("Hay duplicados: confirma la casilla para guardarlos igualmente.");
+      } else {
+        toast("No se pudo guardar. Revisa el mensaje e inténtalo de nuevo.");
+      }
+    } catch (err) {
+      console.warn("Error confirmando flujo:", err);
+      toast("No se pudo guardar el movimiento.");
+    }
+    state.flowBusy = false;
+    renderRoute();
+  }
+
+  async function deleteFlow(id) {
+    if (isDemoMode()) {
+      state.flows = state.flows.filter(f => f.id !== id);
+      toast("Movimiento eliminado de esta sesión.");
+      renderRoute();
+      return;
+    }
+    try {
+      const res = await fetch(`/api/flows/${id}`, {method:"DELETE"});
+      if (res.ok) {
+        state.flows = state.flows.filter(f => f.id !== id);
+        const mRes = await fetch("/api/marcador").catch(() => null);
+        if (mRes && mRes.ok) state.serverMarcador = await mRes.json();
+        toast("Movimiento eliminado.");
+      } else {
+        toast("No se pudo eliminar el movimiento.");
+      }
+    } catch (err) {
+      console.warn("Error eliminando flujo:", err);
+      toast("No se pudo eliminar el movimiento.");
+    }
+    renderRoute();
+  }
+
+  async function saveSync() {
+    const ticker = state.portfolioTicker;
+    const shares = Number(state.portfolioShares);
+    const price = Number(state.portfolioPrice);
+    let persisted = false;
+    if (state.connected) {
+      try {
+        const res = await fetch("/api/positions", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ticker, qty: shares, avg_cost: price, invested: shares * price, source: "manual"})});
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        if (state.portfolioReplace) {
+          await Promise.all(state.assets.filter(a => a.ticker !== ticker).map(a => fetch("/api/positions/" + encodeURIComponent(a.ticker), {method:"DELETE"})));
+        }
+        persisted = true;
+      } catch (err) {
+        console.warn("No se pudo guardar la posición:", err);
+      }
+    }
+    const asset = {ticker, name: ticker + " · posición importada", shares, price, cost: shares * price, color:"#b7c5a9", change:0, priceStatus:"sin_precio", priceFuente: persisted ? "manual" : "", priceAsof:"", verified: persisted, type: assetType(ticker)};
+    if (state.portfolioReplace) state.assets = [asset];
+    else state.assets = [...state.assets.filter(a => a.ticker !== ticker), asset];
+    Object.assign(state, {portfolioSync:false, portfolioTicker:"", portfolioShares:"", portfolioPrice:"", portfolioChecked:false, portfolioReplace:false, portfolioConfirmReplace:false, portfolioFileName:""});
+    toast(persisted ? "Cartera guardada en tu base de datos." : "Cartera actualizada solo en esta sesión.");
+    renderRoute();
+  }
+
+  async function saveAnalysisJournal() {
+    const entry = {id: Date.now(), ticker: state.analysisTicker.toUpperCase(), action: state.analysisSide, amount: Number(state.analysisAmount) || 0, thesis: state.analysisThesis, risk: state.analysisRisk, invalidation: state.analysisInvalidation, date: "Hoy"};
+    state.entries = [entry, ...state.entries];
+    await saveJournalEntry(entry);
+    toast("Decisión guardada en tu diario.");
+    navigate("diario");
+  }
+
+  async function saveReview() {
+    const id = state.journalReviewId;
+    const leccion = state.journalLesson;
+    const entry = state.entries.find(e2 => e2.id === id);
+    if (entry) entry.lesson = leccion;
+    state.journalReviewId = null;
+    state.journalLesson = "";
+    if (state.connected && typeof id === "number") {
+      try {
+        await fetch("/api/journal/" + id + "/evaluate", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({leccion})});
+      } catch (err) {
+        console.warn("No se pudo guardar la evaluación:", err);
+      }
+    }
+    toast(state.connected ? "Evaluación guardada en tu diario." : "Evaluación registrada para esta sesión.");
+    renderRoute();
+  }
+
+  async function saveSettings() {
+    state.settingsSaved = true;
+    if (state.connected) {
+      try {
+        const lim = Number(state.settingsLimit);
+        const calls = [fetch("/api/profile", {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({nivel_riesgo: state.settingsRisk})})];
+        if (lim > 0) calls.push(fetch("/api/limits", {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({max_position_pct: lim})}));
+        await Promise.all(calls);
+        toast("Preferencias guardadas en tu base de datos.");
+        renderRoute();
+        return;
+      } catch (err) {
+        console.warn("No se pudieron guardar los ajustes:", err);
+      }
+    }
+    toast("Preferencias guardadas para esta sesión de demostración.");
+    renderRoute();
+  }
+
+  function confirmReset() {
+    state.assets = JSON.parse(JSON.stringify(initialAssets));
+    state.entries = JSON.parse(JSON.stringify(initialEntries));
+    state.radar = JSON.parse(JSON.stringify(radarUniverse));
+    state.flows = [];
+    state.savings = 1240;
+    state.cash = 0;
+    if (dialog.open) dialog.close();
+    toast("Datos de demostración restablecidos.");
+    renderRoute();
+  }
+
+  // ---- Delegación de eventos ----
+  document.querySelector(".skip-link").addEventListener("click", event => {
+    event.preventDefault();
+    main.focus({preventScroll:true});
+    main.scrollIntoView({block:"start", behavior:"auto"});
+  });
+
+  document.addEventListener("click", event => {
+    const currentLink = event.target.closest(".nav-link");
+    if (currentLink && currentLink.dataset.route === state.route) { closeMenu(false); main.focus({preventScroll:true}); }
+    const el = event.target.closest("[data-action]");
+    if (!el || el.disabled) return;
+    switch (el.dataset.action) {
+      case "menu": openMenu(); break;
+      case "close-menu": closeMenu(); break;
+      case "theme": state.theme = state.theme === "light" ? "dark" : "light"; savePreferences(); applyTheme(); break;
+      case "about": closeMenu(false); about(); break;
+      case "search": openSearch(); break;
+      case "privacy": state.private = !state.private; savePreferences(); applyPrivacy(); if (state.route === "asistente") renderMessages(); break;
+      case "export": exportCsv(); break;
+      case "asset": if (dialog.open) dialog.close(); openPosition(el.dataset.ticker); break;
+      case "radar-asset": if (dialog.open) dialog.close(); openRadarAsset(el.dataset.ticker); break;
+      case "watch": toggleWatch(el.dataset.ticker); break;
+      case "analyze": if (dialog.open) dialog.close(); navigate("analisis", el.dataset.ticker); break;
+      case "prompt": if (dialog.open) dialog.close(); state.pendingPrompt = el.dataset.prompt; navigate("asistente"); break;
+      case "goto": navigate(el.dataset.route); break;
+      case "close-dialog": dialog.close(); break;
+      case "close-toast": document.getElementById("toast").classList.remove("show"); clearTimeout(toastTimer); break;
+
+      case "filter": state.filter = el.dataset.filter; renderExploreResults(); break;
+      case "clear-filters": { state.filter = "todos"; state.query = ""; const s = document.getElementById("explore-search"); if (s) s.value = ""; renderExploreResults(); break; }
+      case "wallet-tab": state.walletTab = el.dataset.walletTab; renderWalletContent(); break;
+      case "chat-prompt": sendQuestion(el.dataset.prompt); break;
+
+      case "start-sync": state.portfolioSync = true; renderRoute(); setTimeout(() => { const s = document.getElementById("sync"); if (s) s.scrollIntoView({behavior:"smooth"}); }, 40); break;
+      case "start-import": state.portfolioSync = true; state.walletTab = "posiciones"; renderRoute(); setTimeout(() => { const s = document.getElementById("sync"); if (s) s.scrollIntoView({behavior:"smooth"}); }, 40); break;
+      case "sync-tab": state.portfolioSync = el.dataset.tab === "importar"; renderRoute(); break;
+      case "trigger-upload": { const f = document.getElementById("file-capture"); if (f) f.click(); break; }
+      case "save-sync": saveSync(); break;
+      case "add-cash": state.cash += 50; toast("Se agregaron $50.00 de efectivo de demostración."); renderRoute(); break;
+
+      case "side": state.analysisSide = el.dataset.side; state.analysisShow = false; renderRoute(); break;
+      case "amount": state.analysisAmount = el.dataset.amt; state.analysisShow = false; renderRoute(); break;
+      case "save-analysis-journal": saveAnalysisJournal(); break;
+
+      case "cancel-savings-draft": state.homeDraft = null; renderRoute(); break;
+      case "save-savings-draft": saveSavingsDraft(); break;
+
+      case "cancel-flow-draft": state.flowDraft = null; state.flowReviewed = false; state.flowAllowDup = false; renderRoute(); break;
+      case "confirm-flow-draft": confirmFlowDraft(); break;
+      case "delete-flow": deleteFlow(Number(el.dataset.id)); break;
+
+      case "eval-entry": state.journalReviewId = Number(el.dataset.evalId); state.journalLesson = ""; renderRoute(); break;
+      case "save-review": saveReview(); break;
+
+      case "save-settings": saveSettings(); break;
+      case "refresh-data": state.loading = true; renderRoute(); loadServerData(); break;
+      case "open-reset": openReset(); break;
+      case "confirm-reset": confirmReset(); break;
+    }
+  });
+
+  document.addEventListener("input", event => {
+    const t = event.target;
+    if (t.id === "explore-search") { state.query = t.value; renderExploreResults(); }
+    else if (t.id === "global-search") searchResults(t.value);
+    else if (t.id === "chat-input") {
+      document.getElementById("chat-send").disabled = !t.value.trim();
+      t.style.height = "44px"; t.style.height = `${Math.min(t.scrollHeight, 144)}px`;
+    }
+    else if (t.id === "input-savings") state.homeSavingText = t.value;
+    else if (t.id === "flow-text") state.flowText = t.value;
+    else if (t.id === "sync-ticker") { state.portfolioTicker = t.value.toUpperCase(); renderRoute(); }
+    else if (t.id === "sync-shares") { state.portfolioShares = t.value; renderRoute(); }
+    else if (t.id === "sync-price") { state.portfolioPrice = t.value; renderRoute(); }
+    else if (t.id === "analysis-ticker") { state.analysisTicker = t.value.toUpperCase(); state.analysisShow = false; renderRoute(); }
+    else if (t.id === "analysis-amount") { state.analysisAmount = t.value; state.analysisShow = false; renderRoute(); }
+    else if (t.id === "journal-ticker") state.journalTicker = t.value.toUpperCase();
+    else if (t.id === "journal-thesis") state.journalThesis = t.value;
+    else if (t.id === "journal-risk") state.journalRisk = t.value;
+    else if (t.id === "journal-invalidation") state.journalInvalidation = t.value;
+    else if (t.id === "result-thesis") { state.analysisThesis = t.value; const b = document.getElementById("btn-save-analysis-journal"); if (b) b.disabled = !(state.analysisThesis.trim() && state.analysisRisk.trim() && state.analysisInvalidation.trim()); }
+    else if (t.id === "result-risk") { state.analysisRisk = t.value; const b = document.getElementById("btn-save-analysis-journal"); if (b) b.disabled = !(state.analysisThesis.trim() && state.analysisRisk.trim() && state.analysisInvalidation.trim()); }
+    else if (t.id === "result-invalidation") { state.analysisInvalidation = t.value; const b = document.getElementById("btn-save-analysis-journal"); if (b) b.disabled = !(state.analysisThesis.trim() && state.analysisRisk.trim() && state.analysisInvalidation.trim()); }
+    else if (t.id === "review-lesson") { state.journalLesson = t.value; const b = document.getElementById("btn-save-review"); if (b) b.disabled = !state.journalLesson.trim(); }
+    else if (t.id === "settings-limit") { state.settingsLimit = t.value; state.settingsSaved = false; renderRoute(); }
+    else if (t.id === "settings-positions") { state.settingsPositions = t.value; state.settingsSaved = false; renderRoute(); }
+  });
+
+  document.addEventListener("change", event => {
+    const t = event.target;
+    if (t.id === "explore-sort") { state.sort = t.value; renderExploreResults(); }
+    else if (t.id === "file-capture") { state.portfolioFileName = t.files && t.files[0] ? t.files[0].name : ""; renderRoute(); }
+    else if (t.id === "sync-check") { state.portfolioChecked = t.checked; renderRoute(); }
+    else if (t.id === "sync-replace") { state.portfolioReplace = t.checked; state.portfolioConfirmReplace = false; renderRoute(); }
+    else if (t.id === "sync-confirm-replace") { state.portfolioConfirmReplace = t.checked; renderRoute(); }
+    else if (t.id === "check-savings-reviewed") { state.homeReviewed = t.checked; renderRoute(); }
+    else if (t.id === "check-flow-reviewed") { state.flowReviewed = t.checked; renderRoute(); }
+    else if (t.id === "check-flow-dup") { state.flowAllowDup = t.checked; renderRoute(); }
+    else if (t.id === "journal-action") state.journalAction = t.value;
+    else if (t.id === "settings-risk") { state.settingsRisk = t.value; state.settingsSaved = false; renderRoute(); }
+  });
+
+  document.addEventListener("submit", event => {
+    if (event.target.id === "form-luna") { event.preventDefault(); sendQuestion(document.getElementById("chat-input").value); }
+    else if (event.target.id === "form-savings") {
+      event.preventDefault();
+      const m = state.homeSavingText.replace(",", ".").match(/\d+(?:\.\d{1,2})?/);
+      if (m && Number(m[0]) > 0) { state.homeDraft = Number(m[0]); state.homeReviewed = false; renderRoute(); }
+    }
+    else if (event.target.id === "form-analysis") { event.preventDefault(); state.analysisShow = true; renderRoute(); }
+    else if (event.target.id === "form-flow") { event.preventDefault(); requestFlowDraft(); }
+    else if (event.target.id === "form-journal") {
+      event.preventDefault();
+      const ticker = state.journalTicker.toUpperCase();
+      if (!/^[A-Z][A-Z0-9.]{0,9}$/.test(ticker)) { toast("Escribe un ticker válido para tu reflexión."); return; }
+      if (!state.journalThesis.trim() || !state.journalRisk.trim() || !state.journalInvalidation.trim()) { toast("Completa tesis, riesgo e invalidación."); return; }
+      const entry = {id: Date.now(), ticker, action: state.journalAction, amount: 0, thesis: state.journalThesis, risk: state.journalRisk, invalidation: state.journalInvalidation, date: "Hoy"};
+      state.entries = [entry, ...state.entries];
+      state.journalTicker = ""; state.journalThesis = ""; state.journalRisk = ""; state.journalInvalidation = "";
+      saveJournalEntry(entry);
+      toast("Reflexión guardada en tu diario.");
+      renderRoute();
+    }
+  });
+
+  document.addEventListener("keydown", event => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault(); if (!dialog.open) { closeMenu(false); openSearch(); } return;
+    }
+    if (event.key === "Enter" && !event.shiftKey && event.target.id === "chat-input" && !event.isComposing) { event.preventDefault(); sendQuestion(event.target.value); return; }
+    if (menuOpen && event.key === "Escape") { event.preventDefault(); closeMenu(); return; }
+    if (menuOpen && event.key === "Tab") {
+      const focusable = [...sidebar.querySelectorAll("a[href],button:not([disabled])")].filter(item => item.getClientRects().length);
+      const first = focusable[0], last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  });
+
+  dialog.addEventListener("click", event => {
+    if (event.target === dialog) {
+      const bounds = dialog.getBoundingClientRect();
+      if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close();
+    }
+  });
+
+  window.addEventListener("hashchange", () => renderRoute(true));
+  mobileQuery.addEventListener("change", () => closeMenu(false));
+  window.addEventListener("storage", event => {
+    if (event.key !== storageKey) return;
+    const newPrefs = readPreferences();
+    if (["light","dark"].includes(newPrefs.theme)) state.theme = newPrefs.theme;
+    state.private = newPrefs.private === true;
+    if (Array.isArray(newPrefs.watched)) state.watched = new Set(newPrefs.watched.filter(t => typeof t === "string"));
+    applyTheme(); applyPrivacy(); refreshWatchButtons();
+    if (state.route === "explorar") renderExploreResults();
+    if (state.route === "cartera" && state.walletTab === "seguimiento") renderWalletContent();
+    if (state.route === "asistente") renderMessages();
+  });
+
+  // ---- Arranque ----
+  hydrateIcons();
+  applyTheme();
+  setMenuState();
+  renderRoute();
+  loadServerData();
+})();

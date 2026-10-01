@@ -97,7 +97,7 @@ def portfolio(uid: int = Depends(current_user), conn=Depends(conn_dep)):
     else:
         cambio_dia = cambio_dia_pct = None
     return {
-        "positions": positions, "cash": cash,
+        "positions": positions, "cash": cash, "cash_registrado": cash_row is not None,
         "cash_currency": cash_row["currency"] if cash_row else "USD",
         "totals": {"invertido": round(invested, 2) if not missing_cost else None,
                    "valor_actual": round(total_mv, 2) if not missing_value else None,

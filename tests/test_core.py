@@ -4,6 +4,8 @@ Las pruebas no dependen de la red: los precios se ingresan manualmente
 (el fetch de Yahoo se prueba por separado y de forma tolerante a fallos).
 """
 import json
+import os
+import sqlite3
 from datetime import datetime, timezone, timedelta
 
 import pytest
@@ -316,6 +318,44 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(D, "DB_PATH", str(tmp_path / "isolated.db"))
     D.init_db()
     return TestClient(app)
+
+
+# ---------- durabilidad: backup, rotación y export ----------
+
+
+def test_backup_y_restauracion_conservan_el_ledger(isolated, tmp_path):
+    c = isolated
+    uid = D.local_user_id(D.get_db())
+    payload = {"reviewed": True, "rows": [
+        {"kind": "deposito", "amount_usd": 65.0, "at": "2026-09-08", "source": "historial"}]}
+    assert c.post("/api/flows/confirm", json=payload).status_code == 200
+    dest = D.backup_db()
+    assert dest and dest.startswith(str(tmp_path))
+    # «Restaurar» = abrir el snapshot como base SQLite cualquiera: mismos datos.
+    snap = sqlite3.connect(dest)
+    snap.row_factory = sqlite3.Row
+    rows = snap.execute("SELECT * FROM contributions WHERE user_id=?", (uid,)).fetchall()
+    assert len(rows) == 1 and rows[0]["amount_usd"] == 65.0
+    assert snap.execute("PRAGMA user_version").fetchone()[0] == D.SCHEMA_VERSION
+    snap.close()
+
+
+def test_backup_rota_snapshots(isolated, tmp_path):
+    for _ in range(3):
+        D.backup_db(max_keep=2)
+    snaps = [f for f in os.listdir(D.backup_dir()) if f.endswith(".db")]
+    assert len(snaps) == 2
+
+
+def test_export_json_legible(isolated):
+    c = isolated
+    assert c.put("/api/cash", json={"amount": 12.5, "currency": "USD"}).status_code == 200
+    r = c.get("/api/system/export")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["exported_at"] and "contributions" in data["tables"]
+    assert data["tables"]["cash"][0]["amount"] == 12.5
+    assert c.post("/api/system/backup").json()["ok"] is True
 
 
 def _price(ticker, price, day_change_pct=None):

@@ -27,3 +27,6 @@ Thumbs.db
 
 # Configuración local de ZCode
 .zcode/
+
+# Respaldos locales (datos personales)
+backups/

@@ -21,10 +21,12 @@ def test_local_home_serves_navigation_and_static_assets(session):
     homepage = session.get("/")
     assert homepage.status_code == 200
     assert homepage.headers["cache-control"] == "no-cache"
-    assert 'href="#analisis"' in homepage.text and 'href="#ajustes"' in homepage.text
-    assert '<link rel="stylesheet" href="/app.css">' in homepage.text
-    styles = session.get("/app.css")
-    assert styles.status_code == 200 and styles.headers["cache-control"] == "no-cache"
+    # El shell (sidebar, topbar, diálogo y toast) vive en el HTML estático;
+    # app.js pinta cada vista dentro de #main-content.
+    assert 'id="sidebar"' in homepage.text and 'class="nav-link"' in homepage.text
+    assert 'id="main-content"' in homepage.text
+    assert 'href="/app.css"' in homepage.text and 'src="/app.js"' in homepage.text
+    assert "<noscript>" in homepage.text
     assert session.get("/api/portfolio").status_code == 200
     assert session.get("/api/assistant/status").status_code == 200
 

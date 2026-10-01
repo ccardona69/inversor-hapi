@@ -14,13 +14,22 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
 from . import db as D
-from .routes import ai, decisions, market, portfolio, profile, radar, system, trades
+from .routes import ai, decisions, marcador, market, portfolio, profile, radar, system, trades
 
 app = FastAPI(title="Inversor Hapi IA", version="0.1.0")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
 D.init_db()
+# Snapshot diario al arrancar: el ledger es irreemplazable, el código no.
+# Además queda un export JSON append-only legible sin la app.
+if D.backup_due():
+    D.backup_db()
+    _conn = D.get_db()
+    try:
+        D.export_snapshot(D.local_user_id(_conn))
+    finally:
+        _conn.close()
 
-for module in (profile, portfolio, market, trades, ai, decisions, radar, system):
+for module in (profile, portfolio, market, trades, ai, decisions, radar, system, marcador):
     app.include_router(module.router)
 
 
@@ -30,8 +39,6 @@ def index():
                         headers={"Cache-Control": "no-cache"})
 
 
-# no-cache en todos los archivos del frontend: cambian junto con el código y sin
-# esta cabecera el navegador mostraba versiones viejas con funciones ausentes.
 @app.get("/app.css")
 def app_css():
     return FileResponse(os.path.join(STATIC_DIR, "app.css"),
@@ -42,3 +49,4 @@ def app_css():
 def app_js():
     return FileResponse(os.path.join(STATIC_DIR, "app.js"),
                         headers={"Cache-Control": "no-cache"})
+
