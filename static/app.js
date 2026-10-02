@@ -51,6 +51,11 @@
   const soles = value => `S/ ${priceFormatter.format(Math.abs(value))}`;
   const pct = value => `${value >= 0 ? "+" : "−"}${Math.abs(value).toFixed(2)}%`;
   const round = value => Math.round(value * 100) / 100;
+  // Los inputs se escriben como texto (el caret de type=number no se restaura
+  // tras re-render y los dígitos se invertían); se limpia lo no numérico.
+  const cleanNum = (v, int = false) => int
+    ? String(v).replace(/[^0-9]/g, "")
+    : String(v).replace(/[^0-9.]/g, "").replace(/(\..*)\./g, "$1");
 
   // ---- Datos de demostracion (solo si no hay backend) ----
   const initialAssets = [
@@ -262,6 +267,9 @@
         if (sData && sData.limits && sData.limits.max_position_pct != null) {
           state.settingsLimit = String(sData.limits.max_position_pct);
         }
+        if (sData && sData.limits && sData.limits.positions_target != null) {
+          state.settingsPositions = String(sData.limits.positions_target);
+        }
       }
       if (profRes && profRes.ok) {
         const pData = await profRes.json();
@@ -359,8 +367,6 @@
       if (pocketOut == null) pocketOut = 986.40;
       if (result == null) result = invested - pocketOut;
       if (spyDiff == null) spyDiff = 3.8;
-    } else if (result == null && pocketOut != null) {
-      result = invested - pocketOut;
     }
 
     const alc = (state.serverMarcador && state.serverMarcador.alcancia) || {};
@@ -381,9 +387,10 @@
       ? `${rk.diversificacion_efectiva} activos` : (isDemo ? "2.0 activos" : "Sin dato");
     const moneyOrNA = v => (v == null ? "Sin dato" : privateText(money(v)));
 
+    const sinPrecio = isDemo ? 0 : state.assets.filter(a => !(a.price > 0)).length;
     const snapshotRows = state.assets.map(a => {
-      const value = round(a.shares * a.price);
-      return `<li><button class="snapshot-row" data-action="asset" data-ticker="${escapeHtml(a.ticker)}"><span class="sr-only">Ver detalle de </span>${assetLabel(a.ticker, a.name, monoTone(a.ticker, a.type || assetType(a.ticker)))}<span class="snapshot-value">${privateText(money(value))}<span class="cell-sub">${(value / (invested || 1) * 100).toFixed(1)}% de lo invertido</span></span>${icon("chevron","snapshot-chevron")}</button></li>`;
+      const value = a.price > 0 ? round(a.shares * a.price) : null;
+      return `<li><button class="snapshot-row" data-action="asset" data-ticker="${escapeHtml(a.ticker)}"><span class="sr-only">Ver detalle de </span>${assetLabel(a.ticker, a.name, monoTone(a.ticker, a.type || assetType(a.ticker)))}<span class="snapshot-value">${value != null ? `${privateText(money(value))}<span class="cell-sub">${(value / (invested || 1) * 100).toFixed(1)}% de lo invertido</span>` : `<span class="muted">Sin dato</span>`}</span>${icon("chevron","snapshot-chevron")}</button></li>`;
     }).join("");
 
     main.innerHTML = intro(
@@ -396,6 +403,7 @@
         <section class="card balance-card" aria-label="Resumen de la cartera">
           <div class="balance-top"><p class="balance-label">Tu cartera vale hoy</p><button class="icon-btn" data-action="privacy" id="privacy-button" aria-pressed="${state.private}" aria-label="${state.private ? "Mostrar" : "Ocultar"} importes">${icon(state.private ? "eyeoff" : "eye")}</button></div>
           <div class="balance-amount">${privateText(money(invested))}</div>
+          ${sinPrecio ? `<div class="small muted">Sin cotización en ${sinPrecio} ${sinPrecio === 1 ? "posición" : "posiciones"}</div>` : ""}
           <div class="balance-return">${result != null ? `<span class="badge ${result >= 0 ? "badge-green" : "badge-red"}">${icon("trend","icon-sm")}${privateText((result >= 0 ? "+" : "−") + money(Math.abs(result)), result >= 0 ? "positive" : "negative")}</span><span class="small muted">${result >= 0 ? "por encima" : "por debajo"} de lo que salió de tu bolsillo</span>` : `<span class="badge badge-muted">Sin dato aún</span><span class="small muted">falta el valor actual o tu marcador</span>`}</div>
           <dl class="balance-stats"><div><dt>Cartera + efectivo</dt><dd>${privateText(money(invested + state.cash))}</dd></div><div><dt>Disponible</dt><dd>${privateText(money(state.cash))}</dd></div></dl>
           <section class="snapshot" aria-labelledby="snapshot-heading"><div class="snapshot-head"><h2 id="snapshot-heading">Tus posiciones</h2><a class="btn btn-plain" href="#cartera">Ver cartera ${icon("external","icon-sm")}</a></div><ul class="snapshot-list">${snapshotRows || `<li class="small muted" style="padding:16px 0">Aún no hay posiciones registradas.</li>`}</ul></section>
@@ -450,18 +458,20 @@
   function positionsTable() {
     const invested = investedTotal();
     return `<table class="positions-table"><caption class="sr-only">Posiciones de la cartera. Los importes están en dólares estadounidenses.</caption><thead><tr><th scope="col">Activo</th><th scope="col">Precio utilizado</th><th scope="col">Valor en cartera</th><th scope="col">Resultado</th><th scope="col"><span class="sr-only">Detalles</span></th></tr></thead><tbody>${state.assets.map(a => {
-      const value = round(a.shares * a.price), gain = round(value - a.cost);
-      return `<tr><td>${assetLabel(a.ticker, a.name, monoTone(a.ticker, a.type || assetType(a.ticker)))}</td><td data-label="Precio utilizado">${privateText(money(a.price))}<span class="cell-sub">${a.shares} ${a.type === "ETF" ? "participaciones" : "acciones"}</span></td><td data-label="Valor en cartera">${privateText(money(value))}<span class="cell-sub">${(value / (invested || 1) * 100).toFixed(1)}% de lo invertido</span></td><td data-label="Resultado">${privateText((gain >= 0 ? "+" : "−") + money(Math.abs(gain)), gain >= 0 ? "positive" : "negative")}<span class="cell-sub ${a.change >= 0 ? "positive" : "negative"}">${privateText(pct(a.change))} vs. costo</span></td><td><button class="icon-btn" data-action="asset" data-ticker="${escapeHtml(a.ticker)}" aria-label="Ver detalle de ${escapeHtml(a.ticker)}">${icon("chevron")}</button></td></tr>`;
+      const hasP = a.price > 0;
+      const value = hasP ? round(a.shares * a.price) : null, gain = hasP ? round(value - a.cost) : null;
+      return `<tr><td>${assetLabel(a.ticker, a.name, monoTone(a.ticker, a.type || assetType(a.ticker)))}</td><td data-label="Precio utilizado">${hasP ? `${privateText(money(a.price))}<span class="cell-sub">${a.shares} ${a.type === "ETF" ? "participaciones" : "acciones"}</span>` : "Sin dato"}</td><td data-label="Valor en cartera">${value != null ? `${privateText(money(value))}<span class="cell-sub">${(value / (invested || 1) * 100).toFixed(1)}% de lo invertido</span>` : "Sin dato"}</td><td data-label="Resultado">${gain != null ? `${privateText((gain >= 0 ? "+" : "−") + money(Math.abs(gain)), gain >= 0 ? "positive" : "negative")}<span class="cell-sub ${a.change >= 0 ? "positive" : "negative"}">${privateText(pct(a.change))} vs. costo</span>` : "Sin dato"}</td><td><button class="icon-btn" data-action="asset" data-ticker="${escapeHtml(a.ticker)}" aria-label="Ver detalle de ${escapeHtml(a.ticker)}">${icon("chevron")}</button></td></tr>`;
     }).join("")}</tbody></table>`;
   }
 
   function walletMetricCards() {
     const invested = investedTotal();
-    const gain = round(invested - costBasis());
+    const sinPrecio = state.assets.filter(a => !(a.price > 0)).length;
+    const gain = sinPrecio ? null : round(invested - costBasis());
     const cost = costBasis();
     return `<dl class="wallet-metrics">
-      <div class="card wallet-metric"><dt>Invertido en posiciones</dt><dd>${privateText(money(invested))}</dd><p>${state.assets.length} ${state.assets.length === 1 ? "activo" : "activos"} en tu cartera</p></div>
-      <div class="card wallet-metric"><dt>Resultado no realizado</dt><dd>${privateText((gain >= 0 ? "+" : "−") + money(Math.abs(gain)), gain >= 0 ? "positive" : "negative")}</dd><p>${cost > 0 ? privateText(pct(gain / cost * 100)) + " sobre el coste de las posiciones" : "Sin coste registrado aún"}</p></div>
+      <div class="card wallet-metric"><dt>Invertido en posiciones</dt><dd>${privateText(money(invested))}</dd><p>${sinPrecio ? `Sin cotización en ${sinPrecio} ${sinPrecio === 1 ? "posición" : "posiciones"}` : `${state.assets.length} ${state.assets.length === 1 ? "activo" : "activos"} en tu cartera`}</p></div>
+      <div class="card wallet-metric"><dt>Resultado no realizado</dt><dd>${gain == null ? "Sin dato" : privateText((gain >= 0 ? "+" : "−") + money(Math.abs(gain)), gain >= 0 ? "positive" : "negative")}</dd><p>${gain == null ? "Faltan cotizaciones de mercado" : cost > 0 ? privateText(pct(gain / cost * 100)) + " sobre el coste de las posiciones" : "Sin coste registrado aún"}</p></div>
       <div class="card wallet-metric"><dt>Saldo disponible</dt><dd>${privateText(money(state.cash))}</dd><p>${isDemoMode() ? "Saldo ilustrativo de demostración" : "Efectivo registrado en tu cartera"}</p></div>
     </dl>`;
   }
@@ -469,7 +479,7 @@
   const watchPool = () => {
     const map = new Map();
     state.radar.forEach(r => map.set(r.ticker, {ticker:r.ticker, name:r.name, price:r.price, type:assetType(r.ticker, r.sector || ""), sector:r.sector, note:r.note, verdict:r.verdict, tone:r.tone, src:"radar"}));
-    state.assets.forEach(a => { const existing = map.get(a.ticker) || {}; map.set(a.ticker, {ticker:a.ticker, name:existing.name || a.name, price:existing.price || money(a.price), type:existing.type || assetType(a.ticker), sector:existing.sector || "", note:existing.note || "", verdict:existing.verdict || "", tone:existing.tone || "gray", src:"posicion"}); });
+    state.assets.forEach(a => { const existing = map.get(a.ticker) || {}; map.set(a.ticker, {ticker:a.ticker, name:existing.name || a.name, price:existing.price || (a.price > 0 ? money(a.price) : "Sin dato"), type:existing.type || assetType(a.ticker), sector:existing.sector || "", note:existing.note || "", verdict:existing.verdict || "", tone:existing.tone || "gray", src:"posicion"}); });
     return [...map.values()];
   };
 
@@ -523,13 +533,13 @@
              <span class="eyebrow">BORRADOR EDITABLE</span>
              <div class="field-pair">
                <label class="field-label">Ticker<input class="field" id="sync-ticker" value="${escapeHtml(state.portfolioTicker)}" maxlength="10" placeholder="Ej. VOO"/></label>
-               <label class="field-label">Participaciones<input class="field" type="number" min="0" step="any" id="sync-shares" value="${escapeHtml(state.portfolioShares)}" placeholder="0.00"/></label>
+               <label class="field-label">Participaciones<input class="field" type="text" inputmode="decimal" id="sync-shares" value="${escapeHtml(state.portfolioShares)}" placeholder="0.00"/></label>
              </div>
-             <label class="field-label">Precio por participación · USD<input class="field" type="number" min="0" step="any" id="sync-price" value="${escapeHtml(state.portfolioPrice)}" placeholder="0.00"/></label>
+             <label class="field-label">Precio por participación · USD<input class="field" type="text" inputmode="decimal" id="sync-price" value="${escapeHtml(state.portfolioPrice)}" placeholder="0.00"/></label>
              <label class="check-line"><input type="checkbox" id="sync-check" ${state.portfolioChecked ? "checked" : ""}/> Revisé cada dato contra Hapi</label>
              <label class="check-line"><input type="checkbox" id="sync-replace" ${state.portfolioReplace ? "checked" : ""}/> Reemplazar toda mi cartera</label>
              ${state.portfolioReplace ? `<label class="check-line warning"><input type="checkbox" id="sync-confirm-replace" ${state.portfolioConfirmReplace ? "checked" : ""}/> Entiendo que se quitarán ${state.assets.map(a => a.ticker).join(", ")}</label>` : ""}
-             <button type="button" class="btn btn-primary" data-action="save-sync" ${(!/^[A-Z][A-Z0-9.]{0,9}$/.test(state.portfolioTicker) || Number(state.portfolioShares) <= 0 || Number(state.portfolioPrice) <= 0 || !state.portfolioChecked || (state.portfolioReplace && !state.portfolioConfirmReplace)) ? "disabled" : ""}>Confirmar importación ${icon("arrow")}</button>
+             <button type="button" class="btn btn-primary" data-action="save-sync" ${(!/^[A-Z][A-Z0-9.]{0,9}$/.test(state.portfolioTicker) || !(Number(state.portfolioShares) > 0) || !(Number(state.portfolioPrice) > 0) || !state.portfolioChecked || (state.portfolioReplace && !state.portfolioConfirmReplace)) ? "disabled" : ""}>Confirmar importación ${icon("arrow")}</button>
            </div>
          </div>`}
      </section>
@@ -579,7 +589,7 @@
               ${!asset ? '<p class="hint" style="margin-top:8px">Solo puedes simular ventas de posiciones que ya tienes.</p>' : ""}
             </div>
             <label class="field-label">Monto en dólares
-              <div class="amount-field"><span>$</span><input type="number" min="0.01" step="0.01" id="analysis-amount" value="${escapeHtml(state.analysisAmount)}"/><span>USD</span></div>
+              <div class="amount-field"><span>$</span><input type="text" inputmode="decimal" id="analysis-amount" value="${escapeHtml(state.analysisAmount)}"/><span>USD</span></div>
             </label>
             <div class="chips">
               ${[50, 100, 200].map(n => `<button type="button" class="tab-btn" data-action="amount" data-amt="${n}">$${n}</button>`).join("")}
@@ -905,9 +915,9 @@
             <option value="agresivo" ${state.settingsRisk === "agresivo" ? "selected" : ""}>Agresivo</option>
           </select></div>
         <div class="settings-row"><div><h3>Máximo por empresa</h3><p>Evita que una sola posición domine tu cartera.</p></div>
-          <div class="settings-number"><input type="number" min="1" max="100" id="settings-limit" value="${escapeHtml(state.settingsLimit)}" aria-label="Máximo por empresa en porcentaje"/>%</div></div>
+          <div class="settings-number"><input type="text" inputmode="numeric" id="settings-limit" value="${escapeHtml(state.settingsLimit)}" aria-label="Máximo por empresa en porcentaje"/>%</div></div>
         <div class="settings-row"><div><h3>Posiciones objetivo</h3><p>El número de activos que quieres mantener aproximadamente.</p></div>
-          <div class="settings-number"><input type="number" min="1" max="100" id="settings-positions" value="${escapeHtml(state.settingsPositions)}" aria-label="Número de posiciones objetivo"/></div></div>
+          <div class="settings-number"><input type="text" inputmode="numeric" id="settings-positions" value="${escapeHtml(state.settingsPositions)}" aria-label="Número de posiciones objetivo"/></div></div>
         ${conflict ? `<div class="settings-warning">Con ${escapeHtml(state.settingsPositions)} posiciones, un límite de ${escapeHtml(state.settingsLimit)}% no permite distribuir el 100% de la cartera. Considera ajustar uno de los valores.</div>` : ""}
         <div class="settings-save"><button type="button" class="btn btn-primary" data-action="save-settings">Guardar preferencias ${icon("arrow")}</button>${state.settingsSaved ? `<span>${icon("check","icon-sm")} Guardado</span>` : ""}</div>
       </section>
@@ -938,17 +948,18 @@
   function openPosition(ticker) {
     const a = state.assets.find(item => item.ticker === ticker);
     if (!a) return;
-    const value = round(a.shares * a.price), gain = round(value - a.cost);
+    const hasP = a.price > 0;
+    const value = hasP ? round(a.shares * a.price) : null, gain = hasP ? round(value - a.cost) : null;
     const isDemo = isDemoMode();
     const statusTag = isDemo ? badge("HECHO · DEMO", "demo") : (a.priceStatus === "actual" || a.priceStatus === "reciente" ? badge("HECHO", "green") : badge("POR VERIFICAR", "demo"));
     openDialog("Detalle del activo", `
       ${assetLabel(a.ticker, a.name, monoTone(a.ticker, a.type || assetType(a.ticker)))}
       <span class="badge ${a.type === "ETF" ? "badge-purple" : "badge-blue"}">${a.type || assetType(a.ticker)}</span>
       <dl class="detail-metrics">
-        <div class="detail-metric"><dt>Precio utilizado</dt><dd>${privateText(money(a.price))}</dd></div>
-        <div class="detail-metric"><dt>Resultado de la posición</dt><dd class="${gain >= 0 ? "positive" : "negative"}">${privateText((gain >= 0 ? "+" : "−") + money(Math.abs(gain)))}</dd></div>
+        <div class="detail-metric"><dt>Precio utilizado</dt><dd>${hasP ? privateText(money(a.price)) : "Sin dato"}</dd></div>
+        <div class="detail-metric"><dt>Resultado de la posición</dt><dd class="${gain != null ? (gain >= 0 ? "positive" : "negative") : ""}">${gain != null ? privateText((gain >= 0 ? "+" : "−") + money(Math.abs(gain))) : "Sin dato"}</dd></div>
         <div class="detail-metric"><dt>En la cartera</dt><dd>${a.shares} unidades</dd></div>
-        <div class="detail-metric"><dt>Valor de la posición</dt><dd>${privateText(money(value))}</dd></div>
+        <div class="detail-metric"><dt>Valor de la posición</dt><dd>${value != null ? privateText(money(value)) : "Sin dato"}</dd></div>
       </dl>
       <table class="data-table"><tbody>
         <tr><th>Costo registrado</th><td>${a.cost ? privateText(money(a.cost)) : "Sin dato"}</td></tr>
@@ -956,7 +967,7 @@
         <tr><th>Estado</th><td>${isDemo ? "Sincronización por verificar" : (a.verified ? "Verificado por ti" : "Pendiente de verificación")}</td></tr>
       </tbody></table>
       <p class="detail-flag">${icon("info")} Los niveles ATR requieren precios de mercado verificados. ${statusTag}</p>
-      <div class="dialog-actions"><button class="btn" data-action="watch" data-ticker="${escapeHtml(a.ticker)}" aria-pressed="${state.watched.has(a.ticker)}">${icon(state.watched.has(a.ticker) ? "check" : "star")}${state.watched.has(a.ticker) ? "En seguimiento" : "Añadir a seguimiento"}</button><button class="btn btn-primary" data-action="analyze" data-ticker="${escapeHtml(a.ticker)}">${icon("sliders")}Simular decisión</button><button class="btn" data-action="prompt" data-prompt="¿Qué me puedes decir de ${escapeHtml(a.ticker)} en mi cartera?">${icon("sparkles")}Preguntar a Luna</button></div>`);
+      <div class="dialog-actions">${!isDemo && !a.verified ? `<button class="btn" data-action="verify-position" data-ticker="${escapeHtml(a.ticker)}">${icon("check")}Marcar como verificada</button>` : ""}<button class="btn" data-action="watch" data-ticker="${escapeHtml(a.ticker)}" aria-pressed="${state.watched.has(a.ticker)}">${icon(state.watched.has(a.ticker) ? "check" : "star")}${state.watched.has(a.ticker) ? "En seguimiento" : "Añadir a seguimiento"}</button><button class="btn btn-primary" data-action="analyze" data-ticker="${escapeHtml(a.ticker)}">${icon("sliders")}Simular decisión</button><button class="btn" data-action="prompt" data-prompt="¿Qué me puedes decir de ${escapeHtml(a.ticker)} en mi cartera?">${icon("sparkles")}Preguntar a Luna</button></div>`);
   }
 
   function openRadarAsset(ticker) {
@@ -1313,12 +1324,30 @@
         console.warn("No se pudo guardar la posición:", err);
       }
     }
-    const asset = {ticker, name: ticker + " · posición importada", shares, price, cost: shares * price, color:"#b7c5a9", change:0, priceStatus:"sin_precio", priceFuente: persisted ? "manual" : "", priceAsof:"", verified: persisted, type: assetType(ticker)};
+    // El precio ingresado es el costo por participación, no una cotización:
+    // el backend devuelve market_value null y la verificación queda pendiente.
+    const asset = {ticker, name: ticker + " · posición importada", shares, price: 0, cost: shares * price, color:"#b7c5a9", change:0, priceStatus:"sin_precio", priceFuente: persisted ? "manual" : "", priceAsof:"", verified: false, type: assetType(ticker)};
     if (state.portfolioReplace) state.assets = [asset];
     else state.assets = [...state.assets.filter(a => a.ticker !== ticker), asset];
     Object.assign(state, {portfolioSync:false, portfolioTicker:"", portfolioShares:"", portfolioPrice:"", portfolioChecked:false, portfolioReplace:false, portfolioConfirmReplace:false, portfolioFileName:""});
     toast(persisted ? "Cartera guardada en tu base de datos." : "Cartera actualizada solo en esta sesión.");
     renderRoute();
+  }
+
+  async function verifyPosition(ticker) {
+    if (!state.connected) return;
+    try {
+      const res = await fetch("/api/positions/" + encodeURIComponent(ticker) + "/verify", {method: "POST"});
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const a = state.assets.find(item => item.ticker === ticker);
+      if (a) a.verified = true;
+      toast("Posición marcada como verificada por ti.");
+      await loadServerData();
+      if (dialog.open) openPosition(ticker);
+    } catch (err) {
+      console.warn("No se pudo verificar la posición:", err);
+      toast("No se pudo verificar la posición.");
+    }
   }
 
   async function saveAnalysisJournal() {
@@ -1352,8 +1381,12 @@
     if (state.connected) {
       try {
         const lim = Number(state.settingsLimit);
+        const pos = Number(state.settingsPositions);
+        const limitsBody = {};
+        if (lim > 0) limitsBody.max_position_pct = lim;
+        if (pos >= 1) limitsBody.positions_target = pos;
         const calls = [fetch("/api/profile", {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({nivel_riesgo: state.settingsRisk})})];
-        if (lim > 0) calls.push(fetch("/api/limits", {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({max_position_pct: lim})}));
+        if (Object.keys(limitsBody).length) calls.push(fetch("/api/limits", {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify(limitsBody)}));
         await Promise.all(calls);
         toast("Preferencias guardadas en tu base de datos.");
         renderRoute();
@@ -1401,6 +1434,7 @@
       case "asset": if (dialog.open) dialog.close(); openPosition(el.dataset.ticker); break;
       case "radar-asset": if (dialog.open) dialog.close(); openRadarAsset(el.dataset.ticker); break;
       case "watch": toggleWatch(el.dataset.ticker); break;
+      case "verify-position": verifyPosition(el.dataset.ticker); break;
       case "analyze": if (dialog.open) dialog.close(); navigate("analisis", el.dataset.ticker); break;
       case "prompt": if (dialog.open) dialog.close(); state.pendingPrompt = el.dataset.prompt; navigate("asistente"); break;
       case "goto": navigate(el.dataset.route); break;
@@ -1451,10 +1485,10 @@
     else if (t.id === "input-savings") state.homeSavingText = t.value;
     else if (t.id === "flow-text") state.flowText = t.value;
     else if (t.id === "sync-ticker") { state.portfolioTicker = t.value.toUpperCase(); renderRoute(); }
-    else if (t.id === "sync-shares") { state.portfolioShares = t.value; renderRoute(); }
-    else if (t.id === "sync-price") { state.portfolioPrice = t.value; renderRoute(); }
+    else if (t.id === "sync-shares") { state.portfolioShares = cleanNum(t.value); renderRoute(); }
+    else if (t.id === "sync-price") { state.portfolioPrice = cleanNum(t.value); renderRoute(); }
     else if (t.id === "analysis-ticker") { state.analysisTicker = t.value.toUpperCase(); state.analysisShow = false; renderRoute(); }
-    else if (t.id === "analysis-amount") { state.analysisAmount = t.value; state.analysisShow = false; renderRoute(); }
+    else if (t.id === "analysis-amount") { state.analysisAmount = cleanNum(t.value); state.analysisShow = false; renderRoute(); }
     else if (t.id === "journal-ticker") state.journalTicker = t.value.toUpperCase();
     else if (t.id === "journal-thesis") state.journalThesis = t.value;
     else if (t.id === "journal-risk") state.journalRisk = t.value;
@@ -1463,8 +1497,8 @@
     else if (t.id === "result-risk") { state.analysisRisk = t.value; const b = document.getElementById("btn-save-analysis-journal"); if (b) b.disabled = !(state.analysisThesis.trim() && state.analysisRisk.trim() && state.analysisInvalidation.trim()); }
     else if (t.id === "result-invalidation") { state.analysisInvalidation = t.value; const b = document.getElementById("btn-save-analysis-journal"); if (b) b.disabled = !(state.analysisThesis.trim() && state.analysisRisk.trim() && state.analysisInvalidation.trim()); }
     else if (t.id === "review-lesson") { state.journalLesson = t.value; const b = document.getElementById("btn-save-review"); if (b) b.disabled = !state.journalLesson.trim(); }
-    else if (t.id === "settings-limit") { state.settingsLimit = t.value; state.settingsSaved = false; renderRoute(); }
-    else if (t.id === "settings-positions") { state.settingsPositions = t.value; state.settingsSaved = false; renderRoute(); }
+    else if (t.id === "settings-limit") { state.settingsLimit = cleanNum(t.value, true); state.settingsSaved = false; renderRoute(); }
+    else if (t.id === "settings-positions") { state.settingsPositions = cleanNum(t.value, true); state.settingsSaved = false; renderRoute(); }
   });
 
   document.addEventListener("change", event => {
