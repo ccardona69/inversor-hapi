@@ -54,3 +54,39 @@ reversión. Las decisiones se agregan al final; no se editan.
 - **Actualización 2026-10-02:** la copia local está cifrada con AES-256-CBC
   (PBKDF2, 100k iteraciones). La clave se entregó al usuario una vez y no está
   guardada en el repo ni en el VPS. Automatización periódica sigue pendiente.
+
+## D-06 — 2026-10-02 — Corrección de 4 bugs del frontend (E2E)
+
+- **Decisión:** corregir los 4 bugs confirmados en la prueba de punta a punta
+  de `static/app.js`, aprobados por el usuario («Sí, los 4 bugs»).
+- **Bugs y corrección:**
+  1. Campos numéricos invertían dígitos («100» → «001»): los 5 inputs pasan de
+     `type="number"` a `type="text"` con `inputmode`, porque el caret de
+     `type=number` no se restaura tras el re-render y saltaba al inicio. Los
+     valores se limpian con `cleanNum` y el botón Guardar queda protegido
+     contra NaN.
+  2. Verificación contradictoria y sin control: una posición importada se
+     mostraba «Verificado por ti» sin estarlo (`verified: persisted`). Ahora
+     toda posición importada nace `verified: false`, como en el backend, y el
+     detalle ofrece el botón «Marcar como verificada» que llama a
+     `POST /api/positions/{ticker}/verify` (endpoint que ya existía).
+  3. Sin precio se fabricaban cifras («$0.00», «−100 %»): tabla, detalle,
+     tarjetas del resumen y snapshot muestran «Sin dato» cuando la posición
+     no tiene cotización, y se elimina el cálculo local del resultado del
+     marcador (`invested − puesto_bolsillo`) que usaba posiciones sin
+     verificar; solo se muestra el `resultado_real` del backend.
+  4. «Posiciones objetivo» no persistía: `saveSettings` solo enviaba
+     `max_position_pct`. Ahora también envía `positions_target` en el mismo
+     `PUT /api/limits` (el endpoint ya acepta claves arbitrarias) y se lee al
+     cargar.
+- **Verificación:** `node --check` + `node --test tests/frontend.test.js`
+  (2 verdes) + `pytest tests/ -q` (313 verdes, 1 deseleccionado de red).
+- **Ampliación (aprobada por el usuario):** si TODAS las posiciones están sin
+  cotización, «Tu cartera vale hoy», «Invertido en posiciones» y «Tu cartera
+  hoy» del marcador muestran «Sin dato» en vez de $0.00 (una suma de ceros
+  también fabrica una cifra). En el detalle, la etiqueta ya no es solo
+  «POR VERIFICAR»: sin verificar → «POR VERIFICAR»; verificada con precio
+  vigente → «HECHO»; verificada con precio de captura/antiguo → «PRECIO POR
+  VERIFICAR»; verificada sin precio → «SIN COTIZACIÓN» — así no contradice a
+  «Verificado por ti».
+- **Reversión:** revertir el commit correspondiente en `static/app.js`.
