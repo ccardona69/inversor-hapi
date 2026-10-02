@@ -267,8 +267,9 @@ def trade_check(body: TradeCheckIn, uid: int = Depends(current_user), conn=Depen
     # Regla del plan, fuente única en brecha.py (la misma que usa el chat):
     # con el ETF bajo su meta, el próximo dinero va al ETF. R1′ evalúa el
     # estado posterior; es vinculante vía el check meta_etf dentro de limites.
-    valor_etf = sum(p["market_value"] or 0 for p in positions
-                    if p["ticker"] in SB.ETF_TICKERS)
+    # Solo ETF de índice amplio VERIFICADOS cuentan para la meta: un ETF sin
+    # verificar no puede aflojar la regla y comprar QQQ no diversifica.
+    valor_etf = SB.etf_meta_value(positions)
     valor_base = sum(p["market_value"] or 0 for p in positions)
     target = D.get_setting(conn, uid, "etf_target_pct", SB.SETTINGS_DEFAULTS["etf_target_pct"])
     plan = BR.regla_plan(tickers=[tk], lado=body.side, meta_pct=target,
@@ -283,21 +284,27 @@ def trade_check(body: TradeCheckIn, uid: int = Depends(current_user), conn=Depen
     plan["faltan_usd"] = BR.brecha(valor_base=valor_base, valor_etf=valor_etf,
                                   meta_pct=target)["brecha_usd"]
 
-    # Los ETF del plan quedan exentos de los límites por empresa y por sector:
-    # la meta del plan puede obligarlos a superar el máximo por posición.
+    # Los ETF de índice amplio del plan quedan exentos de los límites por
+    # empresa y por sector: la meta puede obligarlos a superar el 25 %. QQQ
+    # y DIA NO están exentos: concentran megacaps y no cumplen la meta.
     lim_checks = []
-    if tk not in SB.ETF_TICKERS:
+    if tk not in SB.ETF_META:
         lim_checks.append(
             {"limite": "Máximo por empresa", "valor": peso_despues, "maximo": limits["max_position_pct"],
              "cumple": peso_despues is not None and peso_despues <= limits["max_position_pct"]})
-    lim_checks += [
-        {"limite": "Máximo por operación", "valor": round(amount / total_antes * 100, 2) if total_antes else None,
-         "maximo": limits["max_trade_pct"],
-         "cumple": bool(total_antes) and amount / total_antes * 100 <= limits["max_trade_pct"]},
+    # Comprar el ETF del plan es lo que la regla manda: con una cartera chica,
+    # el aporte supera el 10 % del total y el límite contradiría al plan
+    # (VA-16). Vender ETF sí pasa por el límite: es el impulso a frenar.
+    if not (body.side == "comprar" and tk in SB.ETF_META):
+        lim_checks.append(
+            {"limite": "Máximo por operación",
+             "valor": round(amount / total_antes * 100, 2) if total_antes else None,
+             "maximo": limits["max_trade_pct"],
+             "cumple": bool(total_antes) and amount / total_antes * 100 <= limits["max_trade_pct"]})
+    lim_checks.append(
         {"limite": "Reserva mínima de efectivo", "valor": round(efectivo_despues, 2),
-         "maximo": limits["min_cash_reserve"], "cumple": efectivo_despues >= limits["min_cash_reserve"]},
-    ]
-    if tk not in SB.ETF_TICKERS:
+         "maximo": limits["min_cash_reserve"], "cumple": efectivo_despues >= limits["min_cash_reserve"]})
+    if tk not in SB.ETF_META:
         lim_checks.append(
             {"limite": "Máximo por sector", "valor": sector_pct, "maximo": limits["max_sector_pct"],
              "cumple": sector_pct is not None and sector_pct <= limits["max_sector_pct"]})

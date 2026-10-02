@@ -11,7 +11,7 @@ constantes, sin ventas ni comisiones.
 """
 import math
 
-from .scoreboard import ETF_TICKERS
+from .scoreboard import ETF_META, ETF_TICKERS
 
 
 def es_etf(ticker, etf_tickers=ETF_TICKERS):
@@ -26,8 +26,12 @@ def _etf_pct(valor_etf, valor_base):
 
 def regla_plan(*, tickers=(), lado, meta_pct, etf_pct=None, valor_etf=None,
                valor_base=None, monto_usd=None, delta_base=None,
-               etf_tickers=ETF_TICKERS):
+               etf_tickers=ETF_META):
     """Regla del plan, fuente única.
+
+    Por defecto solo los ETF de índice amplio (ETF_META) cuentan para la
+    meta: comprar QQQ o DIA se evalúa como compra de acción porque no
+    diversifica una cartera ya concentrada en megacaps.
 
     - Compra fuera de etf_tickers: R1 (sin monto) cumple solo si el ETF ya está
       en su meta; R1′ (con monto) exige etf_pct_despues ≥ meta — una compra de
@@ -80,7 +84,12 @@ def brecha(*, valor_base, valor_etf, meta_pct, a_invertir_usd=0.0, entra_a_base=
 
     entra_a_base: USD que la inversión suma a la base (default: todo). Con la
     base = posiciones (V-1), el efectivo y el aporte nuevo entran completos
-    al invertirse."""
+    al invertirse.
+
+    brecha_usd es lo que habría que VENDER de acciones para rebalancear hoy;
+    dinero_nuevo_para_meta_usd es lo que hace falta en APORTES para llegar
+    sin vender: cada USD nuevo sube el numerador pero también la base, así que
+    cierra (1−t) — con meta 50 % hace falta el doble de la brecha."""
     t = (meta_pct or 0) / 100
     B = valor_base or 0.0
     E = valor_etf or 0.0
@@ -89,8 +98,11 @@ def brecha(*, valor_base, valor_etf, meta_pct, a_invertir_usd=0.0, entra_a_base=
     x_estrella = t * (B + dB) - E            # USD a ETF para quedar justo en meta
     a_etf = min(D, max(0.0, x_estrella))
     etf_pct = _etf_pct(E, B)
+    brecha_usd = round(max(0.0, t * B - E), 2)
+    nuevo = round(brecha_usd / (1 - t), 2) if 0 < t < 1 else None
     return {"meta_pct": meta_pct, "etf_pct": etf_pct,
-            "brecha_usd": round(max(0.0, t * B - E), 2),
+            "brecha_usd": brecha_usd,
+            "dinero_nuevo_para_meta_usd": nuevo,
             "en_meta": etf_pct is not None and etf_pct >= meta_pct,
             "a_invertir_usd": round(D, 2), "a_etf_usd": round(a_etf, 2),
             "libre_usd": round(D - a_etf, 2),

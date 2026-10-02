@@ -298,7 +298,8 @@ def test_brecha_endpoint_sin_escrituras():
     assert r.status_code == 200
     d = r.json()
     assert d["base"] == "posiciones" and d["meta_pct"] == 50
-    assert d["a_invertir_usd"] == 135 and d["a_etf_usd"] == 67.5  # cartera vacía
+    assert d["evaluable"] is True                    # cartera vacía: evaluable
+    assert d["a_invertir_usd"] == 135 and d["a_etf_usd"] == 67.5
     assert d["etf_plan"] == "SPY" and "proyeccion" in d
     conn = D.get_db()
     n1 = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
@@ -316,14 +317,28 @@ def test_brecha_con_cartera_y_aporte_planificado():
     assert r.status_code == 200
     d = r.json()
     assert d["valor_base_usd"] == 1000.0 and d["etf_pct"] == 0.0
-    assert d["brecha_usd"] == 500.0                     # 50 % de 1000
+    assert d["brecha_usd"] == 500.0                     # 50 % de 1000 (venta)
+    assert d["dinero_nuevo_para_meta_usd"] == 1000.0    # por aportes: el doble
     assert d["a_etf_usd"] == 200.0 and d["libre_usd"] == 0.0
+
+
+def test_brecha_posiciones_sin_precio_no_evaluable():
+    """Posiciones registradas sin ningún precio: la brecha no se puede
+    evaluar y la ficha va fail-closed (todo al ETF), nunca «en meta»."""
+    client.post("/api/positions", json={"ticker": "AAA", "qty": 10, "invested": 900})
+    client.put("/api/cash", json={"amount": 100})
+    d = client.get("/api/brecha").json()
+    assert d["evaluable"] is False and d["en_meta"] is False
+    assert d["a_etf_usd"] == 100.0 and d["libre_usd"] == 0.0
+    assert d["etf_pct_despues"] is None
+    assert any("no evaluable" in a for a in d["avisos"])
 
 
 def test_plan_put_valida_etf_conocido():
     assert client.put("/api/plan", json={"etf_plan": "VOO"}).status_code == 200
     assert client.get("/api/settings").json()["etf_plan"] == "VOO"
     assert client.put("/api/plan", json={"etf_plan": "NVDA"}).status_code == 400
+    assert client.put("/api/plan", json={"etf_plan": "QQQ"}).status_code == 400
 
 
 def test_draft_deposito_incompleto_marca_costo_estimado():

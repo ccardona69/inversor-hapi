@@ -26,6 +26,12 @@ SETTINGS_DEFAULTS = {
 ETF_TICKERS = frozenset(
     "SPY VOO IVV SPLG VTI ITOT SCHB SCHX QQQ QQQM VT ACWI VEA VXUS IWM DIA RSP".split())
 
+# Meta del plan = índices amplios que sí diversifican una cartera concentrada
+# en megacaps. QQQ/QQQM (100 Nasdaq, con AMZN y GOOG dentro) y DIA (30 valores)
+# no la cumplen: con ellos se «alcanzaría la meta» sin diversificar.
+ETF_META = frozenset(
+    "SPY VOO IVV SPLG VTI ITOT SCHB SCHX VT ACWI VEA VXUS IWM RSP".split())
+
 NOTAS_FANTASMA = [
     "La diferencia incluye lo que te costó operar más veces que el índice.",
     "Incluye la retención del 30 % sobre dividendos del índice, estimada con close/adjclose.",
@@ -48,16 +54,25 @@ def normalize_tc(value):
     return tc if 2.5 <= tc <= 5 else None
 
 
+def etf_meta_value(posiciones):
+    """USD en ETF de índice amplio VERIFICADOS (numerador de etf_pct):
+    un ETF sin verificar no puede aflojar la regla del plan."""
+    return round(sum((p.get("market_value") or 0) for p in posiciones
+                     if p.get("verified") and p.get("ticker") in ETF_META), 2)
+
+
 def etf_pct(posiciones):
-    """% de ETF sobre la exposición con precio (todas las posiciones,
-    verificadas o no: excluir una acción sin verificar inflaría el dato y la
-    regla del plan quedaría fail-open). None si nada tiene precio."""
-    vals = [(p.get("ticker"), p.get("market_value")) for p in posiciones]
-    total = sum(v for _, v in vals if v is not None)
+    """% de ETF de índice amplio sobre la exposición con precio.
+
+    Fail-closed en ambos sentidos: el denominador cuenta TODAS las posiciones
+    con precio (una acción sin verificar no puede inflar el %), y el numerador
+    solo ETF verificados (uno sin verificar no puede aflojar la regla).
+    None si nada tiene precio."""
+    total = sum(p.get("market_value") or 0 for p in posiciones
+                if p.get("market_value") is not None)
     if not total:
         return None
-    etf = sum(v for t, v in vals if v is not None and t in ETF_TICKERS)
-    return round(etf / total * 100, 2)
+    return round(etf_meta_value(posiciones) / total * 100, 2)
 
 
 def depositado_neto(rows):

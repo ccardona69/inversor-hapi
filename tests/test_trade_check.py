@@ -196,13 +196,39 @@ def test_plan_etf_exento_de_limites_y_sin_check_meta(tc):
     assert "Máximo por empresa" not in nombres
     assert "Máximo por sector" not in nombres
     assert "Meta ETF del plan" not in nombres
+    assert "Máximo por operación" not in nombres     # VA-16
     assert d["plan"]["aplica"] is False and d["plan"]["cumple"] is True
     assert d["peso_despues_pct"] > 25    # supera el máximo por empresa y pasa
+    assert d["cumple_limites"] is True
+
+
+def test_aporte_del_plan_no_choca_con_maximo_por_operacion(tc):
+    """VA-16 con cifras del caso real: cartera ≈ USD 1012 en acciones, aporte
+    de USD 135 al ETF del plan = 13.3 % del total (> 10 %). La compra que la
+    regla manda no puede salir «no cumple»."""
+    c = tc
+    c.post("/api/positions", json={"ticker": "AMZN", "qty": 2.5, "invested": 600})
+    c.post("/api/positions", json={"ticker": "GOOG", "qty": 2.3, "invested": 480})
+    c.put("/api/cash", json={"amount": 0})
+    c.quotes.update({"AMZN": 222.65, "GOOG": 198.07, "SPY": 660.0})
+    d = c.post("/api/trade_check",
+               json={"ticker": "SPY", "side": "comprar", "amount_usd": 135}).json()
+    assert 135 / d["total_antes"] * 100 > 10        # el escenario sí excede el 10 %
+    assert d["deposito_necesario"] == 135.0
+    assert not any(x["limite"] == "Máximo por operación" for x in d["limites"])
+    assert d["cumple_limites"] is True
+    # La misma compra en una acción sigue limitada (y bloqueada por el plan).
+    c.quotes["BBB"] = 50.0
+    d = c.post("/api/trade_check",
+               json={"ticker": "BBB", "side": "comprar", "amount_usd": 135}).json()
+    op = next(x for x in d["limites"] if x["limite"] == "Máximo por operación")
+    assert op["cumple"] is False and d["cumple_limites"] is False
 
 
 def test_plan_cumple_con_meta_alcanzada(tc):
     c = tc
     c.post("/api/positions", json={"ticker": "SPY", "qty": 10, "invested": 4000})
+    c.post("/api/positions/SPY/verify")            # el ETF solo cuenta verificado
     c.post("/api/positions", json={"ticker": "AAA", "qty": 1, "invested": 90})
     c.quotes.update({"SPY": 500.0, "AAA": 90.0, "BBB": 50.0})
     d = c.post("/api/trade_check",
@@ -213,9 +239,37 @@ def test_plan_cumple_con_meta_alcanzada(tc):
     assert meta_check["cumple"] is True
 
 
+def test_plan_etf_sin_verificar_no_cuenta_para_la_meta(tc):
+    """Un SPY cargado y pendiente de verificación no afloja la regla."""
+    c = tc
+    c.post("/api/positions", json={"ticker": "SPY", "qty": 10, "invested": 4000})
+    c.post("/api/positions", json={"ticker": "AAA", "qty": 1, "invested": 90})
+    c.quotes.update({"SPY": 500.0, "AAA": 90.0, "BBB": 50.0})
+    d = c.post("/api/trade_check",
+               json={"ticker": "BBB", "side": "comprar", "amount_usd": 50}).json()
+    assert d["plan"]["etf_pct_antes"] == 0.0 and d["plan"]["cumple"] is False
+
+
+def test_plan_qqq_es_accion_para_la_regla(tc):
+    """Comprar QQQ no cumple la meta (concentra megacaps): se le aplican los
+    límites por empresa/sector y el check Meta ETF."""
+    c = tc
+    c.post("/api/positions", json={"ticker": "AAA", "qty": 2, "invested": 180})
+    c.put("/api/cash", json={"amount": 500})
+    c.quotes.update({"AAA": 110.0, "QQQ": 480.0})
+    d = c.post("/api/trade_check",
+               json={"ticker": "QQQ", "side": "comprar", "amount_usd": 100}).json()
+    nombres = [x["limite"] for x in d["limites"]]
+    assert "Máximo por empresa" in nombres and "Máximo por sector" in nombres
+    assert "Meta ETF del plan" in nombres
+    assert d["plan"]["aplica"] is True and d["plan"]["cumple"] is False
+    assert d["cumple_limites"] is False
+
+
 def test_plan_venta_etf_bajo_meta_avisa_sin_bloquear(tc):
     c = tc
     c.post("/api/positions", json={"ticker": "SPY", "qty": 1, "invested": 480})
+    c.post("/api/positions/SPY/verify")
     c.post("/api/positions", json={"ticker": "AAA", "qty": 10, "invested": 900})
     c.put("/api/cash", json={"amount": 0})
     c.quotes.update({"SPY": 500.0, "AAA": 100.0})   # E=500, B=1500 → 33 %
@@ -224,6 +278,9 @@ def test_plan_venta_etf_bajo_meta_avisa_sin_bloquear(tc):
     assert d["plan"]["aplica"] is True and d["plan"]["cumple"] is True
     assert "bajo la meta" in d["plan"]["aviso"]     # después quedaría en 20 %
     assert not any(x["limite"] == "Meta ETF del plan" for x in d["limites"])
+    # Vender ETF sí pasa por el máximo por operación: 250/1500 ≈ 16.7 % > 10 %.
+    op = next(x for x in d["limites"] if x["limite"] == "Máximo por operación")
+    assert op["cumple"] is False
 
 
 def test_luna_endpoint(tc, monkeypatch):

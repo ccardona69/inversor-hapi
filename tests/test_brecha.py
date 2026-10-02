@@ -25,6 +25,17 @@ def test_regla_compra_etf_y_venta_accion_siempre_cumplen():
                          etf_pct=0.0)["aplica"] is False
 
 
+def test_regla_qqq_y_dia_cuentan_como_accion():
+    """Solo los índices amplios (ETF_META) cuentan para la meta: QQQ
+    concentraría las mismas megacaps; venderlo no dispara el aviso de ETF."""
+    r = BR.regla_plan(tickers=["QQQ"], lado="comprar", meta_pct=50,
+                      etf_pct=0.0)
+    assert r["aplica"] is True and r["cumple"] is False
+    r = BR.regla_plan(tickers=["QQQ"], lado="vender", meta_pct=50,
+                      valor_etf=500, valor_base=1500, monto_usd=250)
+    assert r["aplica"] is False and r["aviso"] is None
+
+
 def test_regla_r1_prima_evalua_el_despues():
     """Caso D del plan: 51 % en meta, compra de $500 en acción → 48.57 %."""
     r = BR.regla_plan(tickers=["AAPL"], lado="comprar", meta_pct=50,
@@ -67,6 +78,15 @@ def test_brecha_caso_b_cierra_dentro_del_aporte():
     assert b["a_etf_usd"] == 250.0 and b["libre_usd"] == 50.0
     assert b["etf_pct_despues"] == pytest.approx(50.0, abs=0.01)
     assert b["brecha_despues_usd"] == 0.0
+
+
+def test_brecha_dinero_nuevo_es_el_doble_de_la_venta():
+    """Caso real: B=1012.2 todo en acciones, meta 50 %. La brecha ($506.10)
+    es lo que habría que vender; por aportes hace falta el doble ($1012.20)
+    porque cada USD nuevo también agranda la base."""
+    b = BR.brecha(valor_base=1012.2, valor_etf=0, meta_pct=50)
+    assert b["brecha_usd"] == 506.1
+    assert b["dinero_nuevo_para_meta_usd"] == 1012.2
 
 
 def test_brecha_caso_c_en_meta_margen_libre():

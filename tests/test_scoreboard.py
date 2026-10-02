@@ -18,12 +18,28 @@ DEPOSITOS = [
 
 
 def test_etf_pct_sobre_exposicion_con_precio():
-    pos = [{"ticker": "AMZN", "market_value": 60},
-           {"ticker": "VOO", "market_value": 40},
-           {"ticker": "SINPRECIO", "market_value": None}]
+    pos = [{"ticker": "AMZN", "market_value": 60, "verified": 1},
+           {"ticker": "VOO", "market_value": 40, "verified": 1},
+           {"ticker": "SINPRECIO", "market_value": None, "verified": 1}]
     assert SB.etf_pct(pos) == 40.0
     assert SB.etf_pct([{"ticker": "AMZN", "market_value": 100}]) == 0.0
     assert SB.etf_pct([{"ticker": "AMZN", "market_value": None}]) is None
+
+
+def test_etf_pct_fail_closed_en_ambos_sentidos():
+    """La meta solo cuenta índices amplios verificados; la base cuenta todo
+    lo que tiene precio (una acción sin verificar no infla el %)."""
+    # QQQ concentra las mismas megacaps: no cuenta para la meta.
+    assert SB.etf_pct([{"ticker": "QQQ", "market_value": 100,
+                        "verified": 1}]) == 0.0
+    # Un ETF sin verificar no afloja la regla.
+    assert SB.etf_pct([{"ticker": "VOO", "market_value": 100,
+                        "verified": 0}]) == 0.0
+    # Una acción sin verificar sí entra a la base.
+    pos = [{"ticker": "VOO", "market_value": 50, "verified": 1},
+           {"ticker": "AAA", "market_value": 50, "verified": 0}]
+    assert SB.etf_pct(pos) == 50.0
+    assert SB.etf_meta_value(pos) == 50.0
 
 
 def test_depositado_neto_excluye_ahorro_dividendos_y_suma_retiros():

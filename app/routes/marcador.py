@@ -69,16 +69,16 @@ def estado_plan(conn, uid):
         valor = round(sum(p["market_value"] for p in ver) + (pf.get("cash") or 0), 2)
     # Pesos y etf_pct miden exposición (todas las posiciones con precio),
     # no solo lo verificado: si lo sin verificar es una acción, excluirla
-    # inflaría etf_pct y el guard de Luna quedaría fail-open.
+    # inflaría etf_pct y el guard de Luna quedaría fail-open. En el otro
+    # sentido también es fail-closed: un ETF sin verificar NO cuenta para la
+    # meta (etf_meta_value solo acepta verificados de índice amplio).
     exposicion = [p for p in pf["positions"] if p["market_value"] is not None]
     total_exp = sum(p["market_value"] for p in exposicion)
     pesos = {p["ticker"]: round(p["market_value"] / total_exp * 100, 2)
              for p in exposicion} if total_exp else {}
     etf_pct = SB.etf_pct(exposicion)
     valor_base = round(total_exp, 2) if exposicion else None
-    valor_etf = (round(sum(p["market_value"] for p in exposicion
-                           if p["ticker"] in SB.ETF_TICKERS), 2)
-                 if exposicion else None)
+    valor_etf = SB.etf_meta_value(exposicion) if exposicion else None
     asofs = [p["price_info"]["asof"] for p in ver
              if (p.get("price_info") or {}).get("asof")]
     return {"settings": settings, "rows": rows, "valor_actual": valor,
@@ -90,7 +90,8 @@ def estado_plan(conn, uid):
             "sin_verificar": sin_verificar,
             "pesos": pesos, "etf_pct": etf_pct, "etf_target_pct": settings["etf_target_pct"],
             "valor_base_usd": valor_base, "valor_etf_usd": valor_etf,
-            "etf_plan": settings["etf_plan"]}
+            "etf_plan": settings["etf_plan"],
+            "faltan_precio": missing, "n_posiciones": len(pf["positions"])}
 
 
 def _fx_lookup(fx_rows):
@@ -233,16 +234,31 @@ def brecha_get(aporte_nuevo_usd: float = 0.0,
     avisos = []
     if estado["sin_verificar"]:
         avisos.append(f"Posiciones sin verificar: {', '.join(estado['sin_verificar'])}")
-    if estado["valor_actual"] is None:
+    if estado["faltan_precio"]:
+        avisos.append(f"Sin precio: {', '.join(estado['faltan_precio'])}")
+    evaluable = estado["valor_base_usd"] is not None or estado["n_posiciones"] == 0
+    if not evaluable:
+        # Posiciones registradas pero ninguna con precio: no se puede evaluar.
+        # Fail-closed igual que la regla: el próximo dinero va íntegro al ETF.
+        avisos.append("Ninguna posición tiene precio: brecha no evaluable "
+                      "(base desconocida, nunca «en meta»)")
+        b["a_etf_usd"] = b["a_invertir_usd"]
+        b["libre_usd"] = 0.0
+        b["etf_pct_despues"] = None
+    elif estado["valor_actual"] is None:
         avisos.append("Falta precio o efectivo en USD: la valoración está incompleta")
+    if b["a_etf_usd"] > 0 and b["libre_usd"] > 0:
+        avisos.append("Orden: primero la parte del ETF; lo «libre» solo "
+                      "existe después de comprarla")
     etiqueta = "ESTIMACIÓN" if avisos else "CÁLCULO"
     return {"asof": D.now(), "valor_fuente": estado["valor_fuente"],
-            "etiqueta": etiqueta, "base": "posiciones",
+            "etiqueta": etiqueta, "base": "posiciones", "evaluable": evaluable,
             "meta_pct": s["etf_target_pct"], "etf_pct": estado["etf_pct"],
             "valor_base_usd": estado["valor_base_usd"],
             "valor_etf_usd": estado["valor_etf_usd"],
             "efectivo_usd": efectivo, "etf_plan": s["etf_plan"],
-            **{k: b[k] for k in ("brecha_usd", "en_meta", "a_invertir_usd",
+            **{k: b[k] for k in ("brecha_usd", "dinero_nuevo_para_meta_usd",
+                                 "en_meta", "a_invertir_usd",
                                  "a_etf_usd", "libre_usd", "brecha_despues_usd",
                                  "etf_pct_despues", "margen_acciones_usd")},
             "proyeccion": BR.proyeccion(brecha_usd=b["brecha_usd"],
@@ -256,11 +272,12 @@ def brecha_get(aporte_nuevo_usd: float = 0.0,
 @router.put("/api/plan")
 def plan_put(body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep)):
     """ETF del plan: una sola decisión fija el destino de los aportes y el
-    fantasma. Solo acepta tickers del universo ETF conocido."""
+    fantasma. Solo acepta índices amplios (ETF_META): la meta existe para
+    diversificar, y QQQ/DIA concentrarían las mismas megacaps."""
     etf = str(body.get("etf_plan") or "").upper()
-    if etf not in SB.ETF_TICKERS:
-        raise HTTPException(400, "etf_plan debe ser un ETF conocido: "
-                                 + ", ".join(sorted(SB.ETF_TICKERS)))
+    if etf not in SB.ETF_META:
+        raise HTTPException(400, "etf_plan debe ser un ETF de índice amplio: "
+                                 + ", ".join(sorted(SB.ETF_META)))
     D.set_setting(conn, uid, "etf_plan", etf)
     return {"ok": True, "etf_plan": etf}
 
