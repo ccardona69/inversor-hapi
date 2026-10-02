@@ -81,4 +81,12 @@ reversión. Las decisiones se agregan al final; no se editan.
      cargar.
 - **Verificación:** `node --check` + `node --test tests/frontend.test.js`
   (2 verdes) + `pytest tests/ -q` (313 verdes, 1 deseleccionado de red).
+- **Ampliación (aprobada por el usuario):** si TODAS las posiciones están sin
+  cotización, «Tu cartera vale hoy», «Invertido en posiciones» y «Tu cartera
+  hoy» del marcador muestran «Sin dato» en vez de $0.00 (una suma de ceros
+  también fabrica una cifra). En el detalle, la etiqueta ya no es solo
+  «POR VERIFICAR»: sin verificar → «POR VERIFICAR»; verificada con precio
+  vigente → «HECHO»; verificada con precio de captura/antiguo → «PRECIO POR
+  VERIFICAR»; verificada sin precio → «SIN COTIZACIÓN» — así no contradice a
+  «Verificado por ti».
 - **Reversión:** revertir el commit correspondiente en `static/app.js`.

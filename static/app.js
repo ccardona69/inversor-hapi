@@ -388,6 +388,7 @@
     const moneyOrNA = v => (v == null ? "Sin dato" : privateText(money(v)));
 
     const sinPrecio = isDemo ? 0 : state.assets.filter(a => !(a.price > 0)).length;
+    const todoSinDato = state.assets.length > 0 && sinPrecio === state.assets.length;
     const snapshotRows = state.assets.map(a => {
       const value = a.price > 0 ? round(a.shares * a.price) : null;
       return `<li><button class="snapshot-row" data-action="asset" data-ticker="${escapeHtml(a.ticker)}"><span class="sr-only">Ver detalle de </span>${assetLabel(a.ticker, a.name, monoTone(a.ticker, a.type || assetType(a.ticker)))}<span class="snapshot-value">${value != null ? `${privateText(money(value))}<span class="cell-sub">${(value / (invested || 1) * 100).toFixed(1)}% de lo invertido</span>` : `<span class="muted">Sin dato</span>`}</span>${icon("chevron","snapshot-chevron")}</button></li>`;
@@ -402,7 +403,7 @@
       <div class="overview-grid">
         <section class="card balance-card" aria-label="Resumen de la cartera">
           <div class="balance-top"><p class="balance-label">Tu cartera vale hoy</p><button class="icon-btn" data-action="privacy" id="privacy-button" aria-pressed="${state.private}" aria-label="${state.private ? "Mostrar" : "Ocultar"} importes">${icon(state.private ? "eyeoff" : "eye")}</button></div>
-          <div class="balance-amount">${privateText(money(invested))}</div>
+          <div class="balance-amount">${todoSinDato ? "Sin dato" : privateText(money(invested))}</div>
           ${sinPrecio ? `<div class="small muted">Sin cotización en ${sinPrecio} ${sinPrecio === 1 ? "posición" : "posiciones"}</div>` : ""}
           <div class="balance-return">${result != null ? `<span class="badge ${result >= 0 ? "badge-green" : "badge-red"}">${icon("trend","icon-sm")}${privateText((result >= 0 ? "+" : "−") + money(Math.abs(result)), result >= 0 ? "positive" : "negative")}</span><span class="small muted">${result >= 0 ? "por encima" : "por debajo"} de lo que salió de tu bolsillo</span>` : `<span class="badge badge-muted">Sin dato aún</span><span class="small muted">falta el valor actual o tu marcador</span>`}</div>
           <dl class="balance-stats"><div><dt>Cartera + efectivo</dt><dd>${privateText(money(invested + state.cash))}</dd></div><div><dt>Disponible</dt><dd>${privateText(money(state.cash))}</dd></div></dl>
@@ -431,7 +432,7 @@
           <li class="kv-row"><span>Depósitos netos</span><strong>${moneyOrNA(netDeposits)}</strong></li>
           <li class="kv-row"><span>Costo de cambiar soles a dólares <span class="badge badge-muted">${escapeHtml(fxLabel)}</span></span><strong>${fxCost == null ? "Sin dato" : privateText("−" + money(fxCost))}</strong></li>
           <li class="kv-row kv-highlight"><span>Salió de tu bolsillo</span><strong>${moneyOrNA(pocketOut)}</strong></li>
-          <li class="kv-row"><span>Tu cartera hoy <span class="badge ${isDemo ? "badge-demo" : "badge-green"}">${isDemo ? "HECHO · DEMO" : "HECHO"}</span></span><strong>${privateText(money(invested))}</strong></li>
+          <li class="kv-row"><span>Tu cartera hoy <span class="badge ${isDemo ? "badge-demo" : "badge-green"}">${isDemo ? "HECHO · DEMO" : "HECHO"}</span></span><strong>${todoSinDato ? "Sin dato" : privateText(money(invested))}</strong></li>
           <li class="kv-row kv-result"><span>Resultado de bolsillo</span><strong class="${result != null && result < 0 ? "negative" : "positive"}">${result == null ? "Sin dato" : privateText((result >= 0 ? "+" : "−") + money(Math.abs(result)))}</strong></li>
         </ul>
         <div class="card-foot"><span>Comparación con S&amp;P 500</span><strong>${spyDiff == null ? "Sin dato" : `${spyDiff >= 0 ? "+" : ""}${spyDiff.toFixed(1)}% ${icon("arrowup","icon-sm")}`}</strong></div>
@@ -467,10 +468,11 @@
   function walletMetricCards() {
     const invested = investedTotal();
     const sinPrecio = state.assets.filter(a => !(a.price > 0)).length;
+    const todoSinDato = state.assets.length > 0 && sinPrecio === state.assets.length;
     const gain = sinPrecio ? null : round(invested - costBasis());
     const cost = costBasis();
     return `<dl class="wallet-metrics">
-      <div class="card wallet-metric"><dt>Invertido en posiciones</dt><dd>${privateText(money(invested))}</dd><p>${sinPrecio ? `Sin cotización en ${sinPrecio} ${sinPrecio === 1 ? "posición" : "posiciones"}` : `${state.assets.length} ${state.assets.length === 1 ? "activo" : "activos"} en tu cartera`}</p></div>
+      <div class="card wallet-metric"><dt>Invertido en posiciones</dt><dd>${todoSinDato ? "Sin dato" : privateText(money(invested))}</dd><p>${sinPrecio ? `Sin cotización en ${sinPrecio} ${sinPrecio === 1 ? "posición" : "posiciones"}` : `${state.assets.length} ${state.assets.length === 1 ? "activo" : "activos"} en tu cartera`}</p></div>
       <div class="card wallet-metric"><dt>Resultado no realizado</dt><dd>${gain == null ? "Sin dato" : privateText((gain >= 0 ? "+" : "−") + money(Math.abs(gain)), gain >= 0 ? "positive" : "negative")}</dd><p>${gain == null ? "Faltan cotizaciones de mercado" : cost > 0 ? privateText(pct(gain / cost * 100)) + " sobre el coste de las posiciones" : "Sin coste registrado aún"}</p></div>
       <div class="card wallet-metric"><dt>Saldo disponible</dt><dd>${privateText(money(state.cash))}</dd><p>${isDemoMode() ? "Saldo ilustrativo de demostración" : "Efectivo registrado en tu cartera"}</p></div>
     </dl>`;
@@ -951,7 +953,10 @@
     const hasP = a.price > 0;
     const value = hasP ? round(a.shares * a.price) : null, gain = hasP ? round(value - a.cost) : null;
     const isDemo = isDemoMode();
-    const statusTag = isDemo ? badge("HECHO · DEMO", "demo") : (a.priceStatus === "actual" || a.priceStatus === "reciente" ? badge("HECHO", "green") : badge("POR VERIFICAR", "demo"));
+    const statusTag = isDemo ? badge("HECHO · DEMO", "demo")
+      : (!a.verified ? badge("POR VERIFICAR", "demo")
+      : (a.priceStatus === "actual" || a.priceStatus === "reciente" ? badge("HECHO", "green")
+      : (hasP ? badge("PRECIO POR VERIFICAR", "demo") : badge("SIN COTIZACIÓN", "muted"))));
     openDialog("Detalle del activo", `
       ${assetLabel(a.ticker, a.name, monoTone(a.ticker, a.type || assetType(a.ticker)))}
       <span class="badge ${a.type === "ETF" ? "badge-purple" : "badge-blue"}">${a.type || assetType(a.ticker)}</span>
