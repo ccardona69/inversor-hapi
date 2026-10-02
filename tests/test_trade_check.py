@@ -162,6 +162,36 @@ def test_sec_error_becomes_fundamentales_nota(tc):
     assert "ETF" in r.json()["fundamentales_nota"]
 
 
+def test_plan_declara_brecha_al_comprar_accion(tc):
+    """La regla del plan llega a trade_check: con el ETF bajo la meta, la
+    evaluación declara que el próximo dinero va al ETF (no bloquea)."""
+    c = tc
+    c.post("/api/positions", json={"ticker": "AAA", "qty": 2, "invested": 180})
+    c.quotes.update({"AAA": 110.0, "BBB": 50.0})
+    d = c.post("/api/trade_check",
+               json={"ticker": "BBB", "side": "comprar", "amount_usd": 100}).json()
+    assert d["plan"]["etf_pct"] == 0.0 and d["plan"]["etf_target_pct"] == 50
+    assert d["plan"]["faltan_usd"] == 110.0      # 50 % de la exposición $220
+    assert "próximo dinero va al ETF" in d["plan"]["aviso"]
+    # la brecha queda guardada en la decisión (trazabilidad)
+    row = next(x for x in _decisions(c) if x["id"] == d["decision_id"])
+    assert row["proposal"]["operacion_evaluada"]["plan"]["etf_pct"] == 0.0
+
+
+def test_plan_no_aplica_con_etf_o_meta_cumplida(tc):
+    c = tc
+    c.quotes.update({"VOO": 500.0, "BBB": 50.0})
+    d = c.post("/api/trade_check",
+               json={"ticker": "VOO", "side": "comprar", "amount_usd": 50}).json()
+    assert d["plan"] is None                                # el ticker ES el ETF
+    c.post("/api/positions", json={"ticker": "SPY", "qty": 10, "invested": 4000})
+    c.post("/api/positions", json={"ticker": "AAA", "qty": 1, "invested": 90})
+    c.quotes.update({"SPY": 500.0, "AAA": 90.0})            # ETF ≈ 98 % ≥ meta
+    d = c.post("/api/trade_check",
+               json={"ticker": "BBB", "side": "comprar", "amount_usd": 50}).json()
+    assert d["plan"] is None
+
+
 def test_luna_endpoint(tc, monkeypatch):
     c = tc
     c.post("/api/positions", json={"ticker": "AAA", "qty": 2, "invested": 180})

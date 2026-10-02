@@ -47,6 +47,35 @@ def normalize_tc(value):
     return tc if 2.5 <= tc <= 5 else None
 
 
+def etf_pct(posiciones):
+    """% de ETF sobre la exposición con precio (todas las posiciones,
+    verificadas o no: excluir una acción sin verificar inflaría el dato y la
+    regla del plan quedaría fail-open). None si nada tiene precio."""
+    vals = [(p.get("ticker"), p.get("market_value")) for p in posiciones]
+    total = sum(v for _, v in vals if v is not None)
+    if not total:
+        return None
+    etf = sum(v for t, v in vals if v is not None and t in ETF_TICKERS)
+    return round(etf / total * 100, 2)
+
+
+def plan_breach(etf_pct_, etf_target_pct, tickers=(), valor_etf=None, valor_total=None):
+    """Regla del plan, fuente única: con el ETF bajo su meta, el próximo
+    dinero va al ETF. Devuelve None solo cuando la meta está cumplida o algún
+    ticker evaluado es ETF del plan. `etf_pct=None` (sin dato) cuenta como
+    bajo la meta: la regla es fail-closed, igual que el guard del chat.
+    `faltan_usd` solo aparece si se pasan valor_etf y valor_total."""
+    if etf_target_pct is None or (etf_pct_ is not None and etf_pct_ >= etf_target_pct):
+        return None
+    if any(t in ETF_TICKERS for t in tickers or ()):
+        return None
+    out = {"etf_pct": etf_pct_, "etf_target_pct": etf_target_pct}
+    if valor_etf is not None and valor_total is not None:
+        out["faltan_usd"] = round(
+            max(0.0, etf_target_pct / 100 * valor_total - valor_etf), 2)
+    return out
+
+
 def depositado_neto(rows):
     """Σ depósitos − Σ retiros, en USD. ahorro_soles y dividendos no cuentan."""
     neto = 0.0

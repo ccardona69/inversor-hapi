@@ -17,6 +17,29 @@ DEPOSITOS = [
 ]
 
 
+def test_etf_pct_sobre_exposicion_con_precio():
+    pos = [{"ticker": "AMZN", "market_value": 60},
+           {"ticker": "VOO", "market_value": 40},
+           {"ticker": "SINPRECIO", "market_value": None}]
+    assert SB.etf_pct(pos) == 40.0
+    assert SB.etf_pct([{"ticker": "AMZN", "market_value": 100}]) == 0.0
+    assert SB.etf_pct([{"ticker": "AMZN", "market_value": None}]) is None
+
+
+def test_plan_breach_fuente_unica():
+    # bajo la meta con acción individual → brecha con faltan_usd
+    b = SB.plan_breach(0.0, 50, ["BBB"], valor_etf=0, valor_total=220)
+    assert b["etf_pct"] == 0.0 and b["etf_target_pct"] == 50
+    assert b["faltan_usd"] == 110.0
+    # meta cumplida, ticker ETF del plan o sin dato → no aplica
+    assert SB.plan_breach(55.0, 50, ["BBB"]) is None
+    assert SB.plan_breach(0.0, 50, ["VOO"]) is None
+    # sin dato de ETF cuenta como bajo la meta (fail-closed, como el chat)
+    assert SB.plan_breach(None, 50, ["BBB"])["etf_pct"] is None
+    # sin valores no calcula faltan
+    assert "faltan_usd" not in SB.plan_breach(0.0, 50, ["BBB"])
+
+
 def test_depositado_neto_excluye_ahorro_dividendos_y_suma_retiros():
     rows = DEPOSITOS + [
         {"kind": "ahorro_soles", "soles_amount": 80, "at": "2026-09-10"},

@@ -15,6 +15,7 @@ from .. import decisions as DE
 from .. import marketdata as MD
 from .. import marketpulse as MP
 from .. import risk as RK
+from .. import scoreboard as SB
 from .. import secdata as SEC
 from .. import tradesync as TS
 from ..deps import DISCLAIMER, conn_dep, current_user
@@ -275,6 +276,19 @@ def trade_check(body: TradeCheckIn, uid: int = Depends(current_user), conn=Depen
     ]
     cumple_limites = all(c["cumple"] for c in lim_checks)
 
+    # Regla del plan (misma fuente que el guard del chat): con el ETF bajo su
+    # meta el próximo dinero va al ETF. No bloquea la evaluación: la declara.
+    etf_pct = SB.etf_pct(positions)
+    target = D.get_setting(conn, uid, "etf_target_pct", SB.SETTINGS_DEFAULTS["etf_target_pct"])
+    plan = SB.plan_breach(etf_pct, target, [tk],
+                          sum(p["market_value"] or 0 for p in positions
+                              if p["ticker"] in SB.ETF_TICKERS),
+                          sum(p["market_value"] or 0 for p in positions))
+    if plan is not None:
+        pct = f"{etf_pct:g} %" if etf_pct is not None else "sin dato"
+        plan["aviso"] = (f"ETF en {pct} de tu meta de {target:g} %: "
+                         "por la regla del plan el próximo dinero va al ETF.")
+
     scen = report["valoracion"]
     tec = report["situacion_tecnica"] or {}
     fund_row = conn.execute("SELECT data, source, asof FROM fundamentals WHERE user_id=? AND ticker=?",
@@ -292,6 +306,7 @@ def trade_check(body: TradeCheckIn, uid: int = Depends(current_user), conn=Depen
         "peso_antes_pct": peso_antes, "peso_despues_pct": peso_despues,
         "total_antes": round(total_antes, 2), "total_despues": round(total_despues, 2),
         "limites": lim_checks, "cumple_limites": cumple_limites,
+        "plan": plan,
         "motor": {"propuesta": report["decision"]["decision_propuesta"],
                   "confianza": report["decision"]["nivel_confianza"],
                   "argumentos": report["decision"]["argumentos"]},

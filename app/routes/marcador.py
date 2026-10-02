@@ -72,9 +72,7 @@ def estado_plan(conn, uid):
     total_exp = sum(p["market_value"] for p in exposicion)
     pesos = {p["ticker"]: round(p["market_value"] / total_exp * 100, 2)
              for p in exposicion} if total_exp else {}
-    etf_pct = (round(sum(p["market_value"] for p in exposicion
-                         if p["ticker"] in SB.ETF_TICKERS) / total_exp * 100, 2)
-               if total_exp else None)
+    etf_pct = SB.etf_pct(exposicion)
     asofs = [p["price_info"]["asof"] for p in ver
              if (p.get("price_info") or {}).get("asof")]
     return {"settings": settings, "rows": rows, "valor_actual": valor,

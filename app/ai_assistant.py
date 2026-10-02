@@ -67,12 +67,10 @@ def plan_guard(question, plan):
     nombra un ETF del plan, no aplica (comprar el ETF sí encaja)."""
     etf_pct = plan.get("etf_pct")
     target = plan.get("etf_target_pct") or 50
-    if etf_pct is not None and etf_pct >= target:
-        return None
     if not _BUY_INTENT.search(_fold(question)):
         return None
     tokens = _TICKER_TOKEN.findall(question)
-    if any(t in SB.ETF_TICKERS for t in tokens):
+    if SB.plan_breach(etf_pct, target, tokens) is None:
         return None
     ticker = _ticker_in(question) or "esa acción"
     pct = f"{etf_pct:g} %" if etf_pct is not None else "sin dato"
