@@ -1336,7 +1336,8 @@
     else state.assets = [...state.assets.filter(a => a.ticker !== ticker), asset];
     Object.assign(state, {portfolioSync:false, portfolioTicker:"", portfolioShares:"", portfolioPrice:"", portfolioChecked:false, portfolioReplace:false, portfolioConfirmReplace:false, portfolioFileName:""});
     toast(persisted ? "Cartera guardada en tu base de datos." : "Cartera actualizada solo en esta sesión.");
-    renderRoute();
+    if (persisted) await loadServerData();
+    else renderRoute();
   }
 
   async function verifyPosition(ticker) {
