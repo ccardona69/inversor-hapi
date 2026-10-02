@@ -17,6 +17,7 @@ SETTINGS_DEFAULTS = {
     "r": 0.05,                       # costo anual de oportunidad del dinero quieto
     "fx_default": 3.55,              # soles por dólar de referencia para la alcancía
     "etf_target_pct": 50,            # piso de ETF en la cartera (regla del plan)
+    "etf_plan": "SPY",               # ETF del plan: destino de aportes y fantasma
     "w8ben_expiry": None,            # vencimiento del W-8BEN (YYYY-MM-DD)
     "last_hapi_check": None,         # última entrada a Hapi (actividad = login)
     "ahorro_mensual_declarado": 80,  # ESTIMACIÓN mientras haya <2 meses de datos
@@ -57,23 +58,6 @@ def etf_pct(posiciones):
         return None
     etf = sum(v for t, v in vals if v is not None and t in ETF_TICKERS)
     return round(etf / total * 100, 2)
-
-
-def plan_breach(etf_pct_, etf_target_pct, tickers=(), valor_etf=None, valor_total=None):
-    """Regla del plan, fuente única: con el ETF bajo su meta, el próximo
-    dinero va al ETF. Devuelve None solo cuando la meta está cumplida o algún
-    ticker evaluado es ETF del plan. `etf_pct=None` (sin dato) cuenta como
-    bajo la meta: la regla es fail-closed, igual que el guard del chat.
-    `faltan_usd` solo aparece si se pasan valor_etf y valor_total."""
-    if etf_target_pct is None or (etf_pct_ is not None and etf_pct_ >= etf_target_pct):
-        return None
-    if any(t in ETF_TICKERS for t in tickers or ()):
-        return None
-    out = {"etf_pct": etf_pct_, "etf_target_pct": etf_target_pct}
-    if valor_etf is not None and valor_total is not None:
-        out["faltan_usd"] = round(
-            max(0.0, etf_target_pct / 100 * valor_total - valor_etf), 2)
-    return out
 
 
 def depositado_neto(rows):

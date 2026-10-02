@@ -83,7 +83,7 @@ def test_buy_not_held_sufficient_cash(tc):
     assert abs(d["peso_despues_pct"] - round(100 / 720 * 100, 2)) < 1e-9  # total 220+500
     assert d["efectivo_antes"] == 500 and d["efectivo_despues"] == 400
     assert d["deposito_necesario"] == 0 and d["efectivo_suficiente"] is True
-    assert len(d["limites"]) == 4
+    assert len(d["limites"]) == 5   # los 4 clásicos + meta_etf (BBB no es ETF)
     # la evaluación queda guardada en la decisión para Luna y el registro
     row = next(x for x in _decisions(c) if x["id"] == d["decision_id"])
     assert row["proposal"]["operacion_evaluada"]["ticker"] == "BBB"
@@ -162,34 +162,68 @@ def test_sec_error_becomes_fundamentales_nota(tc):
     assert "ETF" in r.json()["fundamentales_nota"]
 
 
-def test_plan_declara_brecha_al_comprar_accion(tc):
-    """La regla del plan llega a trade_check: con el ETF bajo la meta, la
-    evaluación declara que el próximo dinero va al ETF (no bloquea)."""
+def test_plan_brecha_vinculante_al_comprar_accion(tc):
+    """La regla del plan en trade_check: compra de acción bajo la meta →
+    5º check meta_etf que no cumple (vinculante) + brecha declarada."""
     c = tc
     c.post("/api/positions", json={"ticker": "AAA", "qty": 2, "invested": 180})
+    c.put("/api/cash", json={"amount": 500})
     c.quotes.update({"AAA": 110.0, "BBB": 50.0})
     d = c.post("/api/trade_check",
                json={"ticker": "BBB", "side": "comprar", "amount_usd": 100}).json()
-    assert d["plan"]["etf_pct"] == 0.0 and d["plan"]["etf_target_pct"] == 50
+    assert d["plan"]["etf_pct_antes"] == 0.0 and d["plan"]["meta_pct"] == 50
     assert d["plan"]["faltan_usd"] == 110.0      # 50 % de la exposición $220
+    assert d["plan"]["regla"] == "R1'" and d["plan"]["cumple"] is False
     assert "próximo dinero va al ETF" in d["plan"]["aviso"]
+    meta_check = next(x for x in d["limites"] if x["limite"] == "Meta ETF del plan")
+    assert meta_check["cumple"] is False and meta_check["valor"] == 0.0
+    assert d["cumple_limites"] is False                       # regla vinculante
     # la brecha queda guardada en la decisión (trazabilidad)
     row = next(x for x in _decisions(c) if x["id"] == d["decision_id"])
-    assert row["proposal"]["operacion_evaluada"]["plan"]["etf_pct"] == 0.0
+    assert row["proposal"]["operacion_evaluada"]["plan"]["regla"] == "R1'"
 
 
-def test_plan_no_aplica_con_etf_o_meta_cumplida(tc):
+def test_plan_etf_exento_de_limites_y_sin_check_meta(tc):
+    """Comprar el ETF del plan: sin check de empresa ni de sector (la meta
+    puede obligarlo a superar el 25 %) y sin check meta_etf."""
     c = tc
-    c.quotes.update({"VOO": 500.0, "BBB": 50.0})
+    c.post("/api/positions", json={"ticker": "AAA", "qty": 1, "invested": 90})
+    c.put("/api/cash", json={"amount": 300})
+    c.quotes.update({"AAA": 90.0, "VOO": 500.0})
     d = c.post("/api/trade_check",
-               json={"ticker": "VOO", "side": "comprar", "amount_usd": 50}).json()
-    assert d["plan"] is None                                # el ticker ES el ETF
+               json={"ticker": "VOO", "side": "comprar", "amount_usd": 250}).json()
+    nombres = [x["limite"] for x in d["limites"]]
+    assert "Máximo por empresa" not in nombres
+    assert "Máximo por sector" not in nombres
+    assert "Meta ETF del plan" not in nombres
+    assert d["plan"]["aplica"] is False and d["plan"]["cumple"] is True
+    assert d["peso_despues_pct"] > 25    # supera el máximo por empresa y pasa
+
+
+def test_plan_cumple_con_meta_alcanzada(tc):
+    c = tc
     c.post("/api/positions", json={"ticker": "SPY", "qty": 10, "invested": 4000})
     c.post("/api/positions", json={"ticker": "AAA", "qty": 1, "invested": 90})
-    c.quotes.update({"SPY": 500.0, "AAA": 90.0})            # ETF ≈ 98 % ≥ meta
+    c.quotes.update({"SPY": 500.0, "AAA": 90.0, "BBB": 50.0})
     d = c.post("/api/trade_check",
                json={"ticker": "BBB", "side": "comprar", "amount_usd": 50}).json()
-    assert d["plan"] is None
+    # R1′: 5000/(5000+90+50) ≈ 97 % ≥ 50 → cumple aunque sea acción
+    assert d["plan"]["aplica"] is True and d["plan"]["cumple"] is True
+    meta_check = next(x for x in d["limites"] if x["limite"] == "Meta ETF del plan")
+    assert meta_check["cumple"] is True
+
+
+def test_plan_venta_etf_bajo_meta_avisa_sin_bloquear(tc):
+    c = tc
+    c.post("/api/positions", json={"ticker": "SPY", "qty": 1, "invested": 480})
+    c.post("/api/positions", json={"ticker": "AAA", "qty": 10, "invested": 900})
+    c.put("/api/cash", json={"amount": 0})
+    c.quotes.update({"SPY": 500.0, "AAA": 100.0})   # E=500, B=1500 → 33 %
+    d = c.post("/api/trade_check",
+               json={"ticker": "SPY", "side": "vender", "amount_usd": 250}).json()
+    assert d["plan"]["aplica"] is True and d["plan"]["cumple"] is True
+    assert "bajo la meta" in d["plan"]["aviso"]     # después quedaría en 20 %
+    assert not any(x["limite"] == "Meta ETF del plan" for x in d["limites"])
 
 
 def test_luna_endpoint(tc, monkeypatch):

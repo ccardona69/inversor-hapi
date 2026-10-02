@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from .. import db as D
 from .. import risk as RK
+from .. import scoreboard as SB
 from ..deps import conn_dep, current_user
 
 router = APIRouter()
@@ -12,7 +13,10 @@ router = APIRouter()
 
 @router.get("/api/settings")
 def settings_get(uid: int = Depends(current_user), conn=Depends(conn_dep)):
-    return {"limits": {**RK.DEFAULT_LIMITS, **(D.get_setting(conn, uid, "limits", {}) or {})}}
+    return {"limits": {**RK.DEFAULT_LIMITS, **(D.get_setting(conn, uid, "limits", {}) or {})},
+            "etf_plan": D.get_setting(conn, uid, "etf_plan", SB.SETTINGS_DEFAULTS["etf_plan"]),
+            "etf_target_pct": D.get_setting(conn, uid, "etf_target_pct",
+                                            SB.SETTINGS_DEFAULTS["etf_target_pct"])}
 
 
 @router.post("/api/system/backup")

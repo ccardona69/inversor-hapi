@@ -86,13 +86,17 @@ respetar el plan; la rentabilidad se busca dentro de esos límites, no por encim
 - `routes/` — `profile, portfolio, market, trades, ai, decisions, radar,
   system (incluye borrado total), marcador`.
 
-**Regla del plan (determinista, fuente única):** `scoreboard.plan_breach` +
-`etf_pct`. Con el ETF bajo su meta (default 50 %): en el chat, la intención de
-comprar acciones individuales se responde **sin llamar a la IA**
-(`routes/ai.py` → `plan_guard`); en `trade_check` la evaluación declara la
-brecha en `operacion.plan` (`etf_pct`, `etf_target_pct`, `faltan_usd`, aviso)
-sin bloquearla. Sin dato de ETF la regla es **fail-closed** (cuenta como bajo
-la meta).
+**Regla del plan (determinista, fuente única):** `brecha.regla_plan` +
+`scoreboard.etf_pct`. Con el ETF bajo su meta (default 50 %): en el chat, la
+intención de comprar acciones individuales se responde **sin llamar a la IA**
+(`routes/ai.py` → `plan_guard`); en `trade_check` la regla es **vinculante**:
+R1′ evalúa el ETF% posterior a la operación y entra como 5º check `meta_etf`
+en `limites`; los ETF del plan están exentos de los límites por empresa y por
+sector (la meta puede obligarlos a superar el 25 %). Sin dato de ETF la regla
+es **fail-closed** (cuenta como bajo la meta). Venta de ETF que deja bajo la
+meta: avisa, no bloquea. `GET /api/brecha` expone la ficha solo-lectura con
+las 3 rutas (despacio / ahorrar más / rebalancear, siempre ESTIMACIÓN);
+`PUT /api/plan` fija `etf_plan` (default SPY: destino de aportes y fantasma).
 
 ## 4. Cobertura real del pipeline de datos
 
@@ -130,8 +134,10 @@ Backups íntegros (VACUUM INTO) · SMA/RSI/volatilidad/drawdown · candado
 Host/Origin · suite sin red real (Yahoo+SEC+IA) · prueba `red` fuera del
 default · veredicto `faltan_datos` · regla ETF determinista · fantasma SPY ·
 fingerprint de duplicados · reconcile de costo con doble confirmación ·
-`ungrounded_numbers` · regla del plan con **fuente única** (`SB.plan_breach`)
-compartida por chat y `trade_check`.
+`ungrounded_numbers` · regla del plan con **fuente única** (`brecha.regla_plan`)
+compartida por chat y `trade_check` · brecha ETF en USD con `faltan_usd` ·
+`cobertura_costo_real` en el marcador (0/9 depósitos históricos tienen soles:
+el costo real solo mejora hacia adelante).
 
 ## 7. Backlog Fase 2 (candidatos — NO presentes; exigen gate conductual)
 

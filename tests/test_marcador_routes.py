@@ -282,3 +282,60 @@ def test_luna_compra_de_etf_no_activa_la_regla(monkeypatch):
     r = client.post("/api/assistant/ask", json={"question": "¿compro VOO?"})
     assert r.json()["answer"] == "El ETF encaja en el plan."
     assert llamadas == ["¿compro VOO?"]
+
+
+# ---------- ficha de brecha y ETF del plan (solo lectura / ajuste) ----------
+
+def test_brecha_endpoint_sin_escrituras():
+    """GET /api/brecha calcula con el efectivo real y no escribe nada."""
+    _confirm(DEPOSITOS)
+    client.put("/api/cash", json={"amount": 135})
+    conn = D.get_db(); uid = D.local_user_id(conn)
+    n0 = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+          for t in ("contributions", "journal", "decisions", "settings")}
+    conn.close()
+    r = client.get("/api/brecha")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["base"] == "posiciones" and d["meta_pct"] == 50
+    assert d["a_invertir_usd"] == 135 and d["a_etf_usd"] == 67.5  # cartera vacía
+    assert d["etf_plan"] == "SPY" and "proyeccion" in d
+    conn = D.get_db()
+    n1 = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+          for t in ("contributions", "journal", "decisions", "settings")}
+    conn.close()
+    assert n0 == n1                                     # ni un default persistido
+
+
+def test_brecha_con_cartera_y_aporte_planificado():
+    client.post("/api/positions", json={"ticker": "AAA", "qty": 10, "invested": 900})
+    client.post("/api/prices/manual",
+                json={"ticker": "AAA", "price": 100.0, "asof": "2026-09-30",
+                      "source": "prueba"})
+    r = client.get("/api/brecha?aporte_nuevo_usd=200")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["valor_base_usd"] == 1000.0 and d["etf_pct"] == 0.0
+    assert d["brecha_usd"] == 500.0                     # 50 % de 1000
+    assert d["a_etf_usd"] == 200.0 and d["libre_usd"] == 0.0
+
+
+def test_plan_put_valida_etf_conocido():
+    assert client.put("/api/plan", json={"etf_plan": "VOO"}).status_code == 200
+    assert client.get("/api/settings").json()["etf_plan"] == "VOO"
+    assert client.put("/api/plan", json={"etf_plan": "NVDA"}).status_code == 400
+
+
+def test_draft_deposito_incompleto_marca_costo_estimado():
+    d = _draft("deposité S/ 500")
+    row = next(r for r in d["rows"] if r["kind"] == "deposito")
+    assert "costo_nota" in row and "ESTIMACIÓN" in row["costo_nota"]
+    d = _draft("deposité S/ 500 y llegaron $135")
+    row = next(r for r in d["rows"] if r["kind"] == "deposito")
+    assert "costo_nota" not in row                     # tiene los dos datos
+
+
+def test_marcador_expone_cobertura_costo_real():
+    _confirm(DEPOSITOS)                                # 9 depósitos sin soles
+    m = client.get("/api/marcador").json()["marcador"]
+    assert m["cobertura_costo_real"] == {"con_calculo": 0, "total": 9}

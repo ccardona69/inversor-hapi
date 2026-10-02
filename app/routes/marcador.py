@@ -7,10 +7,12 @@ se cachean 6 h; si Yahoo falla, el fantasma queda «sin dato» y los costos se
 estiman con la tarifa configurada — jamás con el tc implícito ni fx_default.
 """
 from datetime import date, datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import alcancia as AL
+from .. import brecha as BR
 from .. import db as D
 from .. import flowsync as FS
 from .. import marketdata as MD
@@ -73,6 +75,10 @@ def estado_plan(conn, uid):
     pesos = {p["ticker"]: round(p["market_value"] / total_exp * 100, 2)
              for p in exposicion} if total_exp else {}
     etf_pct = SB.etf_pct(exposicion)
+    valor_base = round(total_exp, 2) if exposicion else None
+    valor_etf = (round(sum(p["market_value"] for p in exposicion
+                           if p["ticker"] in SB.ETF_TICKERS), 2)
+                 if exposicion else None)
     asofs = [p["price_info"]["asof"] for p in ver
              if (p.get("price_info") or {}).get("asof")]
     return {"settings": settings, "rows": rows, "valor_actual": valor,
@@ -82,7 +88,9 @@ def estado_plan(conn, uid):
                              "efectivo registrado en Cartera") if valor is not None else None,
             "efectivo_pendiente": bool(ver and cash_row is None),
             "sin_verificar": sin_verificar,
-            "pesos": pesos, "etf_pct": etf_pct, "etf_target_pct": settings["etf_target_pct"]}
+            "pesos": pesos, "etf_pct": etf_pct, "etf_target_pct": settings["etf_target_pct"],
+            "valor_base_usd": valor_base, "valor_etf_usd": valor_etf,
+            "etf_plan": settings["etf_plan"]}
 
 
 def _fx_lookup(fx_rows):
@@ -139,8 +147,9 @@ def marcador(uid: int = Depends(current_user), conn=Depends(conn_dep)):
     settings = estado["settings"]
     spy_rows, fx_rows = None, None
     fuente_spy = fuente_fx = None
+    etf_plan = settings["etf_plan"] or "SPY"
     try:
-        hist = _history("SPY")
+        hist = _history(etf_plan)
         spy_rows, fuente_spy = hist["rows"], hist["source"]
     except MD.MarketDataError:
         pass  # fantasma «sin dato», el marcador sigue
@@ -162,15 +171,20 @@ def marcador(uid: int = Depends(current_user), conn=Depends(conn_dep)):
                   fx=float(settings["fx_default"] or 0),
                   declarado_mensual=float(settings["ahorro_mensual_declarado"] or 0),
                   today=date.today())
+    m["cobertura_costo_real"] = {
+        "con_calculo": sum(1 for d in m["costos_detalle"] if d["etiqueta"] == "CÁLCULO"),
+        "total": m["n_depositos"]}
     return {"marcador": m, "fantasma": fantasma, "alcancia": alc,
             "avisos": _avisos(settings, alc),
             "pesos": estado["pesos"], "etf_pct": estado["etf_pct"],
-            "etf_target_pct": estado["etf_target_pct"],
+            "etf_target_pct": estado["etf_target_pct"], "etf_plan": etf_plan,
+            "valor_base_usd": estado["valor_base_usd"],
+            "valor_etf_usd": estado["valor_etf_usd"],
             "fuentes": {"valor_actual": {"fuente": estado["valor_fuente"],
                                         "fecha": estado["valor_asof"],
                                         "efectivo_pendiente": estado["efectivo_pendiente"],
                                         "sin_verificar": estado["sin_verificar"]},
-                        "spy": {"fuente": fuente_spy,
+                        "spy": {"ticker": etf_plan, "fuente": fuente_spy,
                                 "fecha": fantasma["fecha_precio"] if fantasma else None},
                         "fx": {"fuente": fuente_fx}}}
 
@@ -186,6 +200,71 @@ def alcancia_get(uid: int = Depends(current_user), conn=Depends(conn_dep)):
                    today=date.today())
 
 
+@router.get("/api/brecha")
+def brecha_get(aporte_nuevo_usd: float = 0.0,
+               efectivo_a_usar_usd: Optional[float] = None,
+               aporte_alternativo_usd: Optional[float] = None,
+               uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    """Ficha de brecha del plan (solo lectura, determinista, sin IA): cuánto
+    falta para la meta ETF y cómo repartir el dinero a invertir. La base es la
+    exposición en posiciones (sin efectivo), igual que etf_pct."""
+    for nombre, v in (("aporte_nuevo_usd", aporte_nuevo_usd),
+                      ("efectivo_a_usar_usd", efectivo_a_usar_usd),
+                      ("aporte_alternativo_usd", aporte_alternativo_usd)):
+        if v is not None and (not isinstance(v, (int, float)) or v < 0
+                              or v != v or v == float("inf")):
+            raise HTTPException(400, f"{nombre} debe ser un número ≥ 0 y finito")
+    estado = estado_plan(conn, uid)
+    s = estado["settings"]
+    cash_row = conn.execute("SELECT amount, currency FROM cash WHERE user_id=?",
+                            (uid,)).fetchone()
+    efectivo = cash_row["amount"] if cash_row and cash_row["currency"] == "USD" else 0.0
+    usar_efectivo = efectivo if efectivo_a_usar_usd is None else efectivo_a_usar_usd
+    a_invertir = usar_efectivo + aporte_nuevo_usd
+    # El efectivo no está en la base (V-1: solo posiciones con precio): todo lo
+    # invertido entra a la base completo.
+    b = BR.brecha(valor_base=estado["valor_base_usd"] or 0.0,
+                  valor_etf=estado["valor_etf_usd"] or 0.0,
+                  meta_pct=s["etf_target_pct"], a_invertir_usd=a_invertir)
+    alc = AL.plan(estado["rows"], r=float(s["r"] or 0), fee=float(s["deposit_fee"] or 0),
+                  fx=float(s["fx_default"] or 0),
+                  declarado_mensual=float(s["ahorro_mensual_declarado"] or 0),
+                  today=date.today())
+    avisos = []
+    if estado["sin_verificar"]:
+        avisos.append(f"Posiciones sin verificar: {', '.join(estado['sin_verificar'])}")
+    if estado["valor_actual"] is None:
+        avisos.append("Falta precio o efectivo en USD: la valoración está incompleta")
+    etiqueta = "ESTIMACIÓN" if avisos else "CÁLCULO"
+    return {"asof": D.now(), "valor_fuente": estado["valor_fuente"],
+            "etiqueta": etiqueta, "base": "posiciones",
+            "meta_pct": s["etf_target_pct"], "etf_pct": estado["etf_pct"],
+            "valor_base_usd": estado["valor_base_usd"],
+            "valor_etf_usd": estado["valor_etf_usd"],
+            "efectivo_usd": efectivo, "etf_plan": s["etf_plan"],
+            **{k: b[k] for k in ("brecha_usd", "en_meta", "a_invertir_usd",
+                                 "a_etf_usd", "libre_usd", "brecha_despues_usd",
+                                 "etf_pct_despues", "margen_acciones_usd")},
+            "proyeccion": BR.proyeccion(brecha_usd=b["brecha_usd"],
+                                        meta_pct=s["etf_target_pct"],
+                                        aporte_tipico_usd=alc.get("meta_usd"),
+                                        meses_por_deposito=alc.get("meses_por_deposito"),
+                                        aporte_alternativo_usd=aporte_alternativo_usd),
+            "avisos": avisos}
+
+
+@router.put("/api/plan")
+def plan_put(body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    """ETF del plan: una sola decisión fija el destino de los aportes y el
+    fantasma. Solo acepta tickers del universo ETF conocido."""
+    etf = str(body.get("etf_plan") or "").upper()
+    if etf not in SB.ETF_TICKERS:
+        raise HTTPException(400, "etf_plan debe ser un ETF conocido: "
+                                 + ", ".join(sorted(SB.ETF_TICKERS)))
+    D.set_setting(conn, uid, "etf_plan", etf)
+    return {"ok": True, "etf_plan": etf}
+
+
 # ---------- borrador → confirmación de movimientos (flows) ----------
 
 
@@ -198,6 +277,13 @@ def _draft_rows(result, conn, uid):
         if row.get("kind") in FS.CONTRIB_KINDS:
             row["fingerprint"] = FS.fingerprint(row)
             row["posible_duplicado"] = row["fingerprint"] in known
+            # Costo real del depósito necesita soles Y dólares: con un solo
+            # lado el costo quedará ESTIMACIÓN. Se marca, no se bloquea.
+            if (row.get("kind") == "deposito"
+                    and bool(row.get("amount_usd")) != bool(row.get("soles_amount"))):
+                row["costo_nota"] = ("incompleto: falta el monto en "
+                                     + ("dólares" if row.get("soles_amount") else "soles")
+                                     + "; el costo quedará ESTIMACIÓN")
         rows.append(row)
     return {"rows": rows, "omitted": result.get("omitted", []),
             "model": result.get("model")}

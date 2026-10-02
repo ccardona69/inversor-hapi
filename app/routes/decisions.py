@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from .. import ai_review as RV
 from .. import analysis as AN
+from .. import brecha as BR
 from .. import db as D
 from .. import decisions as DE
 from .. import marketdata as MD
@@ -263,31 +264,49 @@ def trade_check(body: TradeCheckIn, uid: int = Depends(current_user), conn=Depen
         p["market_value"] or 0 for p in positions if p["ticker"] != tk
         and (p.get("sector") or RK.KNOWN_SECTORS.get(p["ticker"], "sin clasificar")) == sector)
     sector_pct = round(sector_value / total_despues * 100, 2) if total_despues else None
-    lim_checks = [
-        {"limite": "Máximo por empresa", "valor": peso_despues, "maximo": limits["max_position_pct"],
-         "cumple": peso_despues is not None and peso_despues <= limits["max_position_pct"]},
+    # Regla del plan, fuente única en brecha.py (la misma que usa el chat):
+    # con el ETF bajo su meta, el próximo dinero va al ETF. R1′ evalúa el
+    # estado posterior; es vinculante vía el check meta_etf dentro de limites.
+    valor_etf = sum(p["market_value"] or 0 for p in positions
+                    if p["ticker"] in SB.ETF_TICKERS)
+    valor_base = sum(p["market_value"] or 0 for p in positions)
+    target = D.get_setting(conn, uid, "etf_target_pct", SB.SETTINGS_DEFAULTS["etf_target_pct"])
+    plan = BR.regla_plan(tickers=[tk], lado=body.side, meta_pct=target,
+                         valor_etf=valor_etf, valor_base=valor_base,
+                         monto_usd=amount,
+                         delta_base=amount if body.side == "comprar" else -amount)
+    if plan["aplica"] and not plan["cumple"] and body.side == "comprar":
+        pct = (f"{plan['etf_pct_antes']:g} %" if plan["etf_pct_antes"] is not None
+               else "sin dato")
+        plan["aviso"] = (f"ETF en {pct} de tu meta de {target:g} %: por la regla "
+                         "del plan el próximo dinero va al ETF.")
+    plan["faltan_usd"] = BR.brecha(valor_base=valor_base, valor_etf=valor_etf,
+                                  meta_pct=target)["brecha_usd"]
+
+    # Los ETF del plan quedan exentos de los límites por empresa y por sector:
+    # la meta del plan puede obligarlos a superar el máximo por posición.
+    lim_checks = []
+    if tk not in SB.ETF_TICKERS:
+        lim_checks.append(
+            {"limite": "Máximo por empresa", "valor": peso_despues, "maximo": limits["max_position_pct"],
+             "cumple": peso_despues is not None and peso_despues <= limits["max_position_pct"]})
+    lim_checks += [
         {"limite": "Máximo por operación", "valor": round(amount / total_antes * 100, 2) if total_antes else None,
          "maximo": limits["max_trade_pct"],
          "cumple": bool(total_antes) and amount / total_antes * 100 <= limits["max_trade_pct"]},
         {"limite": "Reserva mínima de efectivo", "valor": round(efectivo_despues, 2),
          "maximo": limits["min_cash_reserve"], "cumple": efectivo_despues >= limits["min_cash_reserve"]},
-        {"limite": "Máximo por sector", "valor": sector_pct, "maximo": limits["max_sector_pct"],
-         "cumple": sector_pct is not None and sector_pct <= limits["max_sector_pct"]},
     ]
+    if tk not in SB.ETF_TICKERS:
+        lim_checks.append(
+            {"limite": "Máximo por sector", "valor": sector_pct, "maximo": limits["max_sector_pct"],
+             "cumple": sector_pct is not None and sector_pct <= limits["max_sector_pct"]})
+    if body.side == "comprar" and plan["aplica"]:
+        lim_checks.append(
+            {"limite": "Meta ETF del plan",
+             "valor": plan["etf_pct_despues"] if plan["regla"] == "R1'" else plan["etf_pct_antes"],
+             "maximo": target, "cumple": plan["cumple"]})
     cumple_limites = all(c["cumple"] for c in lim_checks)
-
-    # Regla del plan (misma fuente que el guard del chat): con el ETF bajo su
-    # meta el próximo dinero va al ETF. No bloquea la evaluación: la declara.
-    etf_pct = SB.etf_pct(positions)
-    target = D.get_setting(conn, uid, "etf_target_pct", SB.SETTINGS_DEFAULTS["etf_target_pct"])
-    plan = SB.plan_breach(etf_pct, target, [tk],
-                          sum(p["market_value"] or 0 for p in positions
-                              if p["ticker"] in SB.ETF_TICKERS),
-                          sum(p["market_value"] or 0 for p in positions))
-    if plan is not None:
-        pct = f"{etf_pct:g} %" if etf_pct is not None else "sin dato"
-        plan["aviso"] = (f"ETF en {pct} de tu meta de {target:g} %: "
-                         "por la regla del plan el próximo dinero va al ETF.")
 
     scen = report["valoracion"]
     tec = report["situacion_tecnica"] or {}

@@ -6,6 +6,7 @@ import unicodedata
 
 from . import ai_provider as AP
 from . import analysis as AN
+from . import brecha as BR
 from . import db as D
 from . import marketpulse as MP
 from . import risk as RK
@@ -70,7 +71,9 @@ def plan_guard(question, plan):
     if not _BUY_INTENT.search(_fold(question)):
         return None
     tokens = _TICKER_TOKEN.findall(question)
-    if SB.plan_breach(etf_pct, target, tokens) is None:
+    res = BR.regla_plan(tickers=tokens, lado="comprar", meta_pct=target,
+                        etf_pct=etf_pct)
+    if not res["aplica"] or res["cumple"]:
         return None
     ticker = _ticker_in(question) or "esa acción"
     pct = f"{etf_pct:g} %" if etf_pct is not None else "sin dato"
