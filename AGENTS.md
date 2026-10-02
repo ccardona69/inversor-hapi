@@ -116,7 +116,8 @@ backup + migración reversible ensayada en copia.
 | Comisión de transferencia BCP → Hapi | USD 2.99 por depósito (4/4 coincidencias: 21 may, 24 ago, 25 ago, 8 sep 2026) ≈ 2.21 % de un aporte de USD 135 | CÁLC (HR estado de cuenta BCP) |
 | Spread de «Yape Compra USD» | 24 ago: S/1,028 → USD 296.30, tc pagado 3.4695 vs mercado 3.3515 ≈ +3.5 % ≈ USD 10.4 de costo adicional (si el cargo cubre también los 8.28: tc 3.3751 ≈ +0.7 %). Único punto medible: los soles salieron de Interbank y esa cuenta fue eliminada — el spread histórico es SIN DATO irrecuperable | CÁLC (HR estados BCP; mercado: Yahoo PEN=X) |
 | Costo real por depósito | ≈ USD 2.99 de tarifa + spread de cambio. Si el spread es ≈ 3.5 % (única observación), un aporte de USD 135 cuesta ≈ USD 7.7 (≈ 5.7 %), no USD 3 (≈ 2.2 %). Historia: EST para siempre; hacia adelante se mide con soles_amount | EST (una observación) |
-| Transferencias sin depósito registrado | 26 may 11.79 · 3 jun 10.03 · 17 jun 18.09 = 39.91; cada una se financió con compras Yape del mismo día; abono «KALLPA» 39.95 el 24 ago. Hipótesis: depósitos devueltos (INF). Si no lo fueran, faltarían ≈ USD 31 en depósitos | INF — verificar detalle del abono o historial Hapi |
+| Abono «KALLPA» 39.95 (24 ago) | Resuelto: Kallpa era la casa de cambio — soles → USD (HR, usuario). Los soles pagados son SIN DATO (cuenta Interbank eliminada) | HR |
+| Transferencias sin depósito registrado | 26 may 11.79 · 3 jun 10.03 · 17 jun 18.09 = 39.91, financiadas con compras Yape del mismo día. Ya no corresponden al abono KALLPA. Si llegaron a Hapi faltarían ≈ USD 31 en depósitos; si fueron rechazadas, la base está correcta | SIN DATO — verificar historial de depósitos rechazados en Hapi |
 | Radar | 2/78 con fundamentales (2.6 %) | HV/CÁLC |
 | Tests | 312 verdes en HEAD desplegado | HV |
 
@@ -144,15 +145,14 @@ backup + migración reversible ensayada en copia.
 ## 5. Riesgo de ruina operativo
 
 ### 5.1 Pérdida de datos por la cuenta AWS (prioridad máxima)
-- La cuenta está en Free plan (HR, usuario, 2026-10-01). Un Free plan expira a
-  los 6 meses de abierta o al agotar créditos, lo que ocurra primero; luego se
-  pierde el acceso y a los 90 días se borran recursos y datos, salvo que se
+- La cuenta está en Free plan (HV, consola AWS 2026-10-02). Un Free plan expira
+  a los 6 meses de abierta o al agotar créditos, lo que ocurra primero; luego
+  se pierde el acceso y a los 90 días se borran recursos y datos, salvo que se
   pase a Paid plan (HR — AWS Free Tier docs y términos, consultados
   2026-10-01).
-- Créditos reportados: USD 120 (HR, usuario). Apertura de la cuenta: ≈
-  2026-10-01 (HR, usuario). Vencimiento del Free plan: ≈ 2027-04-01 o al
-  agotar créditos (≈ 2027-05), lo que ocurra primero — la fecha dura es
-  ≈ 2027-04-01 (CÁLC sobre HR).
+- Consola AWS 2026-10-02: créditos restantes USD 120, 182 días restantes →
+  vencimiento Free plan 2027-04-01 (HV, captura de consola; región
+  us-east-2/Ohio). Apertura ≈ 2026-10-01 (HR, usuario).
 - Costo estimado t4g.small: USD 0.0168/h ≈ 12.26/mes + IPv4 pública
   USD 0.005/h ≈ 3.65/mes + EBS 8 GB gp3 ≈ 0.64/mes ≈ USD 16.55/mes ≈ 199/año
   (EST; precios HR on-demand, región y tamaño de disco supuestos).
