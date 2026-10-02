@@ -149,9 +149,10 @@ backup + migración reversible ensayada en copia.
   pierde el acceso y a los 90 días se borran recursos y datos, salvo que se
   pase a Paid plan (HR — AWS Free Tier docs y términos, consultados
   2026-10-01).
-- Créditos reportados: USD 120 (HR, usuario). Fecha de apertura de la cuenta:
-  SIN DATO — confirmar en la consola de facturación; de ella sale la fecha
-  límite.
+- Créditos reportados: USD 120 (HR, usuario). Apertura de la cuenta: ≈
+  2026-10-01 (HR, usuario). Vencimiento del Free plan: ≈ 2027-04-01 o al
+  agotar créditos (≈ 2027-05), lo que ocurra primero — la fecha dura es
+  ≈ 2027-04-01 (CÁLC sobre HR).
 - Costo estimado t4g.small: USD 0.0168/h ≈ 12.26/mes + IPv4 pública
   USD 0.005/h ≈ 3.65/mes + EBS 8 GB gp3 ≈ 0.64/mes ≈ USD 16.55/mes ≈ 199/año
   (EST; precios HR on-demand, región y tamaño de disco supuestos).
