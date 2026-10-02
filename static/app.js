@@ -200,14 +200,14 @@
   const monogram = (letter, tone = "") => `<span class="asset-monogram ${tone}" aria-hidden="true">${escapeHtml(letter)}</span>`;
   const assetLabel = (ticker, name, tone = "") => `<span class="asset">${monogram(ticker[0] || "?", tone)}<span><span class="asset-name">${escapeHtml(ticker)}</span><span class="asset-sub" style="display:block">${escapeHtml(name)}</span></span></span>`;
   const watchButton = ticker => `<button class="icon-btn watch-btn" data-action="watch" data-ticker="${escapeHtml(ticker)}" aria-pressed="${state.watched.has(ticker)}" aria-label="${state.watched.has(ticker) ? "Quitar" : "Añadir"} ${escapeHtml(ticker)} ${state.watched.has(ticker) ? "de" : "a"} seguimiento" title="Seguimiento">${icon("star")}</button>`;
-  const footer = () => `<footer class="footer"><p>Hapi IA ayuda a pensar mejor; no decide por ti ni ejecuta operaciones. No es asesoría financiera.</p><button data-action="about">Alcance y origen de datos ${icon("external","icon-sm")}</button></footer>`;
+  const footer = () => `<footer class="footer"><p>Hapi IA ayuda a pensar mejor; no decide por ti ni ejecuta operaciones. No es asesoría financiera.${state.serverVersion ? ` <span class="muted">· build ${escapeHtml(state.serverVersion.version || "sin dato")}</span>` : ""}</p><button data-action="about">Alcance y origen de datos ${icon("external","icon-sm")}</button></footer>`;
   const intro = (eyebrow, title, description, actions = "") => `<section class="page-intro"><div><p class="eyebrow">${eyebrow}</p><h1 id="page-title">${title}</h1><p class="description">${description}</p></div>${actions ? `<div class="intro-actions">${actions}</div>` : ""}</section>`;
   const advanced = (title, childrenHtml) => `<details class="advanced"><summary>${title} ${icon("chevdown")}</summary><div class="advanced-body">${childrenHtml}</div></details>`;
 
   // ---- Comunicación con FastAPI ----
   async function loadServerData() {
     try {
-      const [dashRes, marcRes, pulseRes, radarRes, jourRes, setRes, profRes, flowsRes] = await Promise.all([
+      const [dashRes, marcRes, pulseRes, radarRes, jourRes, setRes, profRes, flowsRes, verRes] = await Promise.all([
         fetch("/api/dashboard").catch(() => null),
         fetch("/api/marcador").catch(() => null),
         fetch("/api/market/pulse").catch(() => null),
@@ -216,6 +216,7 @@
         fetch("/api/settings").catch(() => null),
         fetch("/api/profile").catch(() => null),
         fetch("/api/flows").catch(() => null),
+        fetch("/api/system/version").catch(() => null),
       ]);
 
       if (dashRes && dashRes.ok) {
@@ -239,6 +240,7 @@
           }));
         }
       }
+      if (verRes && verRes.ok) state.serverVersion = await verRes.json();
       if (jourRes && jourRes.ok) {
         const jData = await jourRes.json();
         if (jData && Array.isArray(jData.entries)) {

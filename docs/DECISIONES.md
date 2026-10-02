@@ -51,3 +51,6 @@ reversión. Las decisiones se agregan al final; no se editan.
 - **Ejecución:** `backup_db()` (VACUUM INTO) en el VPS + descarga por SCP +
   verificación de integridad en la copia.
 - **Pendiente:** cifrado de la copia (P4.8) y automatización periódica.
+- **Actualización 2026-10-02:** la copia local está cifrada con AES-256-CBC
+  (PBKDF2, 100k iteraciones). La clave se entregó al usuario una vez y no está
+  guardada en el repo ni en el VPS. Automatización periódica sigue pendiente.

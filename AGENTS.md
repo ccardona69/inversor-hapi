@@ -121,8 +121,8 @@ backup + migración reversible ensayada en copia.
 | Tests | 312 verdes en HEAD desplegado | HV |
 
 ### Deuda técnica (corregida contra el código)
-- Backups: rotación en el disco del VPS + copia off-site en PC local desde
-  2026-10-02 (sin cifrar — pendiente P4.8); integridad verificada en la copia.
+- Backups: rotación en el disco del VPS + copia off-site cifrada (AES-256)
+  en PC local desde 2026-10-02; integridad verificada tras descifrar.
 - trade_check, /api/brecha y PUT /api/plan son API-only: static/app.js no los
   invoca.
 - POST /api/analysis/{t} no consulta la regla del plan (decisions.py:55-142).
@@ -213,9 +213,9 @@ Sin estos pasos, la propuesta no es válida.
 | VA-06 | Fantasma: USD 0.15 fijo por compra simulada, retención 30 %; no replica costo real de depósito | scoreboard.py:138 | Documentar |
 | VA-07 | Regex de verbos + tokens [A-Z]{1,5}; evadible («me animo con NVDA», minúsculas); sin tests de evasión | ai_assistant.py:41-44,73 | Gap → P4.2 |
 | VA-08 | Ruta de entrada estática, cookie 1 año HttpOnly/Secure/SameSite=Lax, sin un solo uso; revocar = editar Caddy | Caddyfile desplegado; run_local.py:12 | Media → P4.7 |
-| VA-09 | VACUUM INTO a backups/ (rotación 10, mismo disco) + copia off-site en PC desde 2026-10-02, sin cifrar; integrity_check OK en la copia | db.py:132-157; system.py:22-28 | Parcial → P4.8 (cifrado) |
+| VA-09 | VACUUM INTO a backups/ (rotación 10) + copia off-site cifrada (AES-256) en PC desde 2026-10-02; integrity_check OK tras descifrar; clave entregada al usuario | db.py:132-157; system.py:22-28 | Resuelto |
 | VA-10 | Snapshot §4 tomado del VPS | /api/brecha en VPS, 2026-10-02 00:20 UTC | Resuelto |
-| VA-11 | Confirmación literal «ELIMINAR», Origin/Referer por middleware, sin backup previo | system.py:38-46; main.py | Gap → P0.8 |
+| VA-11 | Confirmación «ELIMINAR» + Origin/Referer por middleware + backup automático previo desde 2026-10-02 | system.py:63-72; main.py | Resuelto |
 | VA-12 | Histórico 1y por defecto; fantasma 5y; cotización 5d | marketdata.py:31,47; marcador.py:39 | Resuelto |
 | VA-13 | deposit_fee USD 3 fijo por depósito, solo como ESTIMACIÓN; meta S/480 por EOQ | scoreboard.py:16,99-101; alcancia.py:15-16,61-62 | Resuelto |
 | VA-14 | Hasta 40 posiciones, 20 fundamentales, 5 tesis, 10 propuestas, 15 alertas, pulso, plan, límites, perfil; sin política ni tope | ai_assistant.py:149-208; ai_provider.py:164,202 | Gap → P4.5-6 |

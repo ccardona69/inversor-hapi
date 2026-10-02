@@ -308,7 +308,22 @@ def test_photo_endpoints(session, monkeypatch):
 def test_delete_all(session):
     r = session.post("/api/settings/delete_all", json={"confirm": "ELIMINAR"})
     assert r.status_code == 200
+    # P0.8: el borrado deja un respaldo previo verificable, no solo borra.
+    backup = r.json()["backup"]
+    assert backup and os.path.exists(backup)
+    snap = sqlite3.connect(backup)
+    assert snap.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    snap.close()
     assert session.get("/api/portfolio").json()["positions"] == []
+
+
+def test_version_endpoint(session):
+    """P0.9: el hash/tag desplegado es consultable por API (o SIN DATO)."""
+    d = session.get("/api/system/version").json()
+    assert d["etiqueta"] in ("HV", "SIN DATO")
+    assert d["fuente"].startswith("git describe")
+    if d["etiqueta"] == "HV":
+        assert d["version"]
 
 
 # ---------- pruebas con BD aislada (cartera en un paso, cambio del día) ----------
