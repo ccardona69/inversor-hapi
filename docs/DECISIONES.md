@@ -1,0 +1,53 @@
+# DECISIONES.md — Inversor Hapi IA
+
+Registro de decisiones del usuario. Cada entrada: fecha, decisión, motivo,
+reversión. Las decisiones se agregan al final; no se editan.
+
+---
+
+## D-01 — 2026-10-01 — AGENTS.md adoptado como gobierno
+
+- **Decisión:** `AGENTS.md` v1.0 es vinculante; prevalece sobre `CLAUDE.md` y
+  briefs, salvo `docs/BRIEF.md` (spec congelada).
+- **Motivo:** reglas duras, taxonomía epistémica y compuertas G0/GC/G2 para
+  cualquier agente que opere el repo, la base o el VPS.
+- **Reversión:** editar el archivo requiere aprobación explícita del usuario.
+
+## D-02 — 2026-10-01 — Corrección VA-16: límite por operación y ETF_META
+
+- **Decisión:** las compras de ETF de índice amplio (`ETF_META`) quedan exentas
+  del límite «máximo por operación» (10 %); las ventas de ETF siguen sujetas.
+- **Motivo:** la compra que la regla del plan manda (aporte ≈ 13.3 % del total)
+  salía «no cumple»; la regla se contradecía. La venta grande de ETF es el
+  impulso que el plan quiere frenar.
+- **Verificación:** `tests/test_trade_check.py`
+  (`test_aporte_del_plan_no_choca_con_maximo_por_operacion`, venta de ETF
+  sigue fallando el límite). 312 tests verdes.
+- **Reversión:** revertir el commit que incluye `decisions.py:295-303`.
+
+## D-03 — 2026-10-01 — Base canónica = VPS
+
+- **Decisión:** la base de datos canónica es la del VPS; la local es copia de
+  desarrollo.
+- **Motivo:** la app vive desplegada; las fotos se cargan ahí.
+- **Riesgo asumido:** la cuenta AWS es Free plan (cierra a los 6 meses o al
+  agotar créditos; datos borrados 90 días después). Mitigación: backup fuera de
+  AWS (D-05) + decisión de plan antes del vencimiento (fecha: SIN DATO).
+
+## D-04 — 2026-10-01 — Costos históricos de depósito: EST permanente
+
+- **Decisión:** aceptar que el costo real de los 9 depósitos históricos queda
+  como estimación; hacia adelante, cada depósito se registra con `soles_amount`.
+- **Motivo:** los soles salieron de Interbank y esa cuenta fue eliminada; el
+  spread de «Yape Compra USD» es SIN DATO irrecuperable salvo el punto del
+  24 ago (tc pagado 3.4695 vs mercado 3.3515).
+- **Consecuencia:** `deposit_fee` sigue en USD 3 como piso declarado; el costo
+  real probablemente es mayor (≈ USD 7.7 por aporte de USD 135 si el spread es
+  ≈ 3.5 % — EST con una sola observación).
+
+## D-05 — 2026-10-02 — Backup fuera de AWS
+
+- **Decisión:** copia de la base canónica fuera del VPS, a la PC local.
+- **Ejecución:** `backup_db()` (VACUUM INTO) en el VPS + descarga por SCP +
+  verificación de integridad en la copia.
+- **Pendiente:** cifrado de la copia (P4.8) y automatización periódica.
