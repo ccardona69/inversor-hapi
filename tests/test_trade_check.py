@@ -15,6 +15,11 @@ from app import marketdata as MD
 from app import secdata as SEC
 from app.main import app
 
+# La suite previa prueba el interior de las funciones; la puerta del
+# modo plan (409 con el ETF bajo la meta) se abre con el estado inactivo.
+pytestmark = pytest.mark.usefixtures("sin_modo_plan")
+
+
 SEC_RESULT = {"data": {"revenue": 110_000, "eps": 5.0}, "period_end": "2025-12-31",
               "filed": "2026-02-01", "accn": "0000-00-000010",
               "missing": [], "detalle": {"revenue": "Revenues"}}
@@ -228,7 +233,7 @@ def test_aporte_del_plan_no_choca_con_maximo_por_operacion(tc):
 def test_plan_cumple_con_meta_alcanzada(tc):
     c = tc
     c.post("/api/positions", json={"ticker": "SPY", "qty": 10, "invested": 4000})
-    c.post("/api/positions/SPY/verify")            # el ETF solo cuenta verificado
+    c.post("/api/positions/SPY/verify", json={"evidencia": "captura de prueba"})  # el ETF solo cuenta verificado
     c.post("/api/positions", json={"ticker": "AAA", "qty": 1, "invested": 90})
     c.quotes.update({"SPY": 500.0, "AAA": 90.0, "BBB": 50.0})
     d = c.post("/api/trade_check",
@@ -269,7 +274,7 @@ def test_plan_qqq_es_accion_para_la_regla(tc):
 def test_plan_venta_etf_bajo_meta_avisa_sin_bloquear(tc):
     c = tc
     c.post("/api/positions", json={"ticker": "SPY", "qty": 1, "invested": 480})
-    c.post("/api/positions/SPY/verify")
+    c.post("/api/positions/SPY/verify", json={"evidencia": "captura de prueba"})
     c.post("/api/positions", json={"ticker": "AAA", "qty": 10, "invested": 900})
     c.put("/api/cash", json={"amount": 0})
     c.quotes.update({"SPY": 500.0, "AAA": 100.0})   # E=500, B=1500 → 33 %

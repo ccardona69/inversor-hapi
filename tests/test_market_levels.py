@@ -15,6 +15,11 @@ from app import secdata as SEC
 from app.main import app
 from app.routes import market as market_routes
 
+# La suite previa prueba el interior de las funciones; la puerta del
+# modo plan (409 con el ETF bajo la meta) se abre con el estado inactivo.
+pytestmark = pytest.mark.usefixtures("sin_modo_plan")
+
+
 
 # ---------- ATR ----------
 

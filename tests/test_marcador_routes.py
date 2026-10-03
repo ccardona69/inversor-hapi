@@ -11,6 +11,11 @@ from app import flowsync as FS
 from app import marketdata as MD
 from app.main import app
 
+# La suite previa prueba el interior de las funciones; la puerta del
+# modo plan (409 con el ETF bajo la meta) se abre con el estado inactivo.
+pytestmark = pytest.mark.usefixtures("sin_modo_plan")
+
+
 client = TestClient(app)
 
 # Los 9 depósitos reales del historial de Hapi (aceptación): neto $949.41.
@@ -79,7 +84,8 @@ def test_marcador_fecha_es_la_cotizacion_mas_antigua_usada():
     for ticker, price, asof in (("AAA", 10, older), ("BBB", 20, newer)):
         assert client.post("/api/positions", json={"ticker": ticker, "qty": 1,
                                                     "source": "captura"}).status_code == 200
-        assert client.post(f"/api/positions/{ticker}/verify").status_code == 200
+        assert client.post(f"/api/positions/{ticker}/verify",
+                           json={"evidencia": "captura de prueba"}).status_code == 200
         assert client.post("/api/prices/manual", json={"ticker": ticker, "price": price,
                             "asof": asof, "source": "fuente de prueba"}).status_code == 200
     mc = client.get("/api/marcador").json()
@@ -101,7 +107,8 @@ def test_posicion_sin_verificar_no_entra_al_marcador():
     assert mc["fuentes"]["valor_actual"]["sin_verificar"] == ["AAA"]
     assert mc["marcador"]["valor_actual"] is None  # sin valor verificado: sin dato
     # Tras verificarla sí entra.
-    assert client.post("/api/positions/AAA/verify").status_code == 200
+    assert client.post("/api/positions/AAA/verify",
+                       json={"evidencia": "captura de prueba"}).status_code == 200
     mc = client.get("/api/marcador").json()
     assert mc["marcador"]["valor_actual"] == 10
     assert mc["fuentes"]["valor_actual"]["sin_verificar"] == []
@@ -110,7 +117,8 @@ def test_posicion_sin_verificar_no_entra_al_marcador():
 def test_efectivo_en_moneda_incompatible_impide_resultado_de_bolsillo():
     _confirm(DEPOSITOS[:1])
     assert client.post("/api/positions", json={"ticker": "AAA", "qty": 1}).status_code == 200
-    assert client.post("/api/positions/AAA/verify").status_code == 200
+    assert client.post("/api/positions/AAA/verify",
+                       json={"evidencia": "captura de prueba"}).status_code == 200
     assert client.post("/api/prices/manual", json={"ticker": "AAA", "price": 10,
                         "asof": datetime.now(timezone.utc).isoformat(),
                         "source": "fuente de prueba"}).status_code == 200

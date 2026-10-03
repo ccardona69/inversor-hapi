@@ -124,18 +124,23 @@ backup + migración reversible ensayada en copia.
 ### Deuda técnica (corregida contra el código)
 - Backups: rotación en el disco del VPS + copia off-site cifrada (AES-256)
   en PC local desde 2026-10-02; integridad verificada tras descifrar.
-- trade_check, /api/brecha y PUT /api/plan son API-only: static/app.js no los
-  invoca.
-- POST /api/analysis/{t} no consulta la regla del plan (decisions.py:55-142).
-- PUT /api/limits (decisions.py:393-397) y PUT /api/profile (profile.py:17-22)
-  aceptan cualquier valor, sin validación, enfriamiento ni rastro. Este es el
-  hueco «Ulises» real. etf_target_pct no tiene escritor por API.
+- /api/brecha y PUT /api/plan son API-only. trade_check ya lo invoca la UI
+  («¿Compro o vendo?», D-09, sin desplegar).
+- Modo plan (D-09, sin desplegar): con el ETF bajo la meta, radar, pulso,
+  niveles, Luna (chat y opiniones), fundamentales por red y
+  POST /api/analysis/{t} fuera de ETF_META responden 409.
+- PUT /api/limits y PUT /api/profile: validación + enfriamiento de 7 días para
+  lo que afloja (app/cuerdas.py, D-10, sin desplegar). Huecos que siguen:
+  el primer valor de un campo de perfil vacío aplica al instante, y
+  delete_all borra settings (límites y pendientes) sin enfriamiento.
+  etf_target_pct no tiene escritor por API.
 - Fallback a hapi_value de captura sin límite de antigüedad (portfolio.py:56-60).
 - resultado_real del marcador sin etiqueta propia (scoreboard.py:127,135).
-- verify_all marca todo verificado en un UPDATE, sin evidencia (portfolio.py:262-266).
-- plan_guard por palabras clave (ai_assistant.py:41-44); sin pruebas de evasión.
-- Proveedor IA sin tope de gasto ni política de datos declarada
-  (ai_provider.py:164 max_tokens 2048; :202 timeout 120 s).
+- verify_all eliminado; verificar exige evidencia en notes (D-11, sin desplegar).
+- plan_guard por palabras clave (ai_assistant.py:41-44); evadible sin verbo de
+  compra. Mitigado: en modo plan el chat está cerrado.
+- Tope de IA: 30 llamadas/mes en ai_provider.request (D-12, sin desplegar).
+  Sigue sin política de datos declarada ni alerta de presupuesto en Azure.
 - Enlace de entrada estático y cookie de 1 año, sin un solo uso (VA-08).
 - Yahoo Finance (no oficial) como fuente única de precio y tipo de cambio.
 - .secrets/ai.env en texto plano en el disco del VPS.

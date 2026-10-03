@@ -127,6 +127,10 @@
     serverMarcador: null,
     serverPulse: null,
     serverRisk: null,
+    serverBrecha: null,
+    serverMetricas: null,
+    modoPlan: null,
+    etfPlan: "SPY",
     lastRef: "",
 
     // Resumen
@@ -152,6 +156,9 @@
     analysisThesis: "",
     analysisRisk: "",
     analysisInvalidation: "",
+    tradeCheck: null,
+    tradeCheckError: "",
+    tradeCheckBusy: false,
 
     // Movimientos
     flowText: "",
@@ -173,7 +180,14 @@
     settingsRisk: "moderado",
     settingsLimit: "40",
     settingsPositions: "3",
+    settingsMotivo: "",
     settingsSaved: false,
+    settingsNote: "",
+    settingsPendientes: null,
+    profilePendientes: null,
+
+    // Verificación de posiciones
+    verifyEvidence: "",
   };
 
   const savePreferences = () => {
@@ -192,6 +206,9 @@
     const params = new URLSearchParams(location.search);
     return state.demoOverride || params.get("mock") === "1" || params.get("demo") === "1" || location.protocol === "file:" || !state.connected;
   }
+
+  // Modo plan: con el ETF bajo la meta, las «sirenas» se cierran también aquí.
+  const modoPlanActivo = () => !!(state.connected && state.modoPlan && state.modoPlan.activo);
 
   // ---- Helpers de marcado ----
   const privateText = (text, classes = "") => `<span class="num ${classes}" data-private data-value="${escapeHtml(text)}">${escapeHtml(state.private ? "••••" : text)}</span>`;
@@ -212,7 +229,7 @@
   // ---- Comunicación con FastAPI ----
   async function loadServerData() {
     try {
-      const [dashRes, marcRes, pulseRes, radarRes, jourRes, setRes, profRes, flowsRes, verRes] = await Promise.all([
+      const [dashRes, marcRes, pulseRes, radarRes, jourRes, setRes, profRes, flowsRes, verRes, brechaRes, metRes] = await Promise.all([
         fetch("/api/dashboard").catch(() => null),
         fetch("/api/marcador").catch(() => null),
         fetch("/api/market/pulse").catch(() => null),
@@ -222,6 +239,8 @@
         fetch("/api/profile").catch(() => null),
         fetch("/api/flows").catch(() => null),
         fetch("/api/system/version").catch(() => null),
+        fetch("/api/brecha").catch(() => null),
+        fetch("/api/metricas").catch(() => null),
       ]);
 
       if (dashRes && dashRes.ok) {
@@ -229,6 +248,10 @@
         state.connected = true;
       }
       if (marcRes && marcRes.ok) state.serverMarcador = await marcRes.json();
+      state.modoPlan = (state.serverMarcador && state.serverMarcador.modo_plan) || null;
+      if (brechaRes && brechaRes.ok) state.serverBrecha = await brechaRes.json();
+      if (metRes && metRes.ok) state.serverMetricas = await metRes.json();
+      if (modoPlanActivo()) state.radar = [];  // el radar de la demo nunca se muestra conectado
       if (pulseRes && pulseRes.ok) state.serverPulse = await pulseRes.json();
       if (radarRes && radarRes.ok) {
         const rData = await radarRes.json();
@@ -270,12 +293,15 @@
         if (sData && sData.limits && sData.limits.positions_target != null) {
           state.settingsPositions = String(sData.limits.positions_target);
         }
+        if (sData && sData.etf_plan) state.etfPlan = sData.etf_plan;
+        state.settingsPendientes = (sData && sData.pendientes) || null;
       }
       if (profRes && profRes.ok) {
         const pData = await profRes.json();
         if (pData && pData.profile && pData.profile.nivel_riesgo) {
           state.settingsRisk = pData.profile.nivel_riesgo;
         }
+        state.profilePendientes = (pData && pData.pendientes) || null;
       }
       if (flowsRes && flowsRes.ok) {
         const fData = await flowsRes.json();
@@ -394,6 +420,33 @@
       return `<li><button class="snapshot-row" data-action="asset" data-ticker="${escapeHtml(a.ticker)}"><span class="sr-only">Ver detalle de </span>${assetLabel(a.ticker, a.name, monoTone(a.ticker, a.type || assetType(a.ticker)))}<span class="snapshot-value">${value != null ? `${privateText(money(value))}<span class="cell-sub">${(value / (invested || 1) * 100).toFixed(1)}% de lo invertido</span>` : `<span class="muted">Sin dato</span>`}</span>${icon("chevron","snapshot-chevron")}</button></li>`;
     }).join("");
 
+    // Tarjeta del modo plan (solo conectado y mientras esté activo).
+    const met = state.serverMetricas || {};
+    const metValor = (v, fmt) => v == null ? "Sin dato" : fmt(v);
+    const etiq = obj => `<span class="badge badge-muted">${escapeHtml((obj && obj.etiqueta) || "SIN DATO")}</span>`;
+    const modoPlanCard = !modoPlanActivo() ? "" : (() => {
+      const mp = state.modoPlan;
+      const pct = mp.etf_pct != null ? `${mp.etf_pct} %` : "Sin dato";
+      const meta = mp.meta_pct != null ? `${mp.meta_pct} %` : "Sin dato";
+      const nuevo = state.serverBrecha && state.serverBrecha.dinero_nuevo_para_meta_usd;
+      const meses = alc.faltan_meses;
+      return `<section class="card mt-24" aria-label="Modo plan">
+        <div class="section-header"><div class="section-title"><h2>Modo plan activo</h2><p class="small muted">El próximo dinero va al ETF del plan (${escapeHtml(state.etfPlan)}). Explorar y Luna vuelven cuando el ETF llegue a la meta.</p></div>${badge("MODO PLAN", "demo")}</div>
+        <ul class="kv-list">
+          <li class="kv-row"><span>Tu ETF frente a la meta</span><strong>${escapeHtml(pct)} de ${escapeHtml(meta)}</strong></li>
+          <li class="kv-row"><span>Dinero nuevo para llegar a la meta</span><strong>${nuevo == null ? "Sin dato" : privateText(money(nuevo))}</strong></li>
+          <li class="kv-row"><span>Próximo depósito (alcancía)</span><strong>${alc.meta_soles ? "S/ " + Number(alc.meta_soles).toLocaleString("en-US") : "Sin dato"}</strong></li>
+          ${meses != null ? `<li class="kv-row"><span>Meses estimados para juntarlo</span><strong>${escapeHtml(String(meses))}</strong></li>` : ""}
+        </ul>
+        <ul class="kv-list" style="margin-top:16px">
+          <li class="kv-row"><span>ETF en cartera ${etiq(met.etf_pct)}</span><strong>${metValor(met.etf_pct && met.etf_pct.valor, v => v + " %")}</strong></li>
+          <li class="kv-row"><span>Costo por depósito ${etiq(met.costo_por_deposito)}</span><strong>${metValor(met.costo_por_deposito && met.costo_por_deposito.valor, v => privateText(money(v)))}</strong></li>
+          <li class="kv-row"><span>Compras que fueron al plan ${etiq(met.compras_al_plan)}</span><strong>${metValor(met.compras_al_plan && met.compras_al_plan.valor_pct, v => v + " %")}</strong></li>
+          <li class="kv-row"><span>Costo de la herramienta ${etiq(met.costo_sistema)}</span><strong>${metValor(met.costo_sistema && met.costo_sistema.anual_usd, v => privateText(money(v)) + " al año")}</strong></li>
+        </ul>
+      </section>`;
+    })();
+
     main.innerHTML = intro(
       `HOY · ${hoy}`,
       "Buenos días.",
@@ -426,6 +479,8 @@
         </aside>
       </div>
 
+      ${modoPlanCard}
+
       <section class="card mt-24" aria-label="Tu marcador">
         <div class="section-header"><div class="section-title"><h2>Tu marcador</h2><p class="small muted">Lo que pusiste, lo que tienes y la diferencia real.</p></div><span class="badge badge-muted">SIN LETRA PEQUEÑA</span></div>
         <ul class="kv-list">
@@ -438,7 +493,7 @@
         <div class="card-foot"><span>Comparación con S&amp;P 500</span><strong>${spyDiff == null ? "Sin dato" : `${spyDiff >= 0 ? "+" : ""}${spyDiff.toFixed(1)}% ${icon("arrowup","icon-sm")}`}</strong></div>
       </section>
 
-      ${advanced("Pulso de mercado y métricas de riesgo", `
+      ${modoPlanActivo() ? "" : advanced("Pulso de mercado y métricas de riesgo", `
         <div class="advanced-grid">
           <div>
             <span class="eyebrow">PULSO DE MERCADO</span>
@@ -556,7 +611,60 @@
   }
 
   // ---- ¿Compro o vendo? ----
+  const journalBoxHtml = () => `
+    <div class="result-journal">
+      <div><h3>Deja constancia de tu decisión</h3><p>Escribe tu razonamiento ahora; podrás evaluarlo más adelante.</p></div>
+      <div class="form-stack">
+        <label class="field-label">Mi tesis<textarea class="field" id="result-thesis" placeholder="¿Por qué tiene sentido para mí?">${escapeHtml(state.analysisThesis)}</textarea></label>
+        <label class="field-label">Riesgo principal<textarea class="field" id="result-risk" placeholder="¿Qué podría salir mal?">${escapeHtml(state.analysisRisk)}</textarea></label>
+        <label class="field-label">Qué invalidaría mi idea<textarea class="field" id="result-invalidation" placeholder="¿Qué me haría cambiar de opinión?">${escapeHtml(state.analysisInvalidation)}</textarea></label>
+        <button type="button" class="btn btn-primary" data-action="save-analysis-journal" id="btn-save-analysis-journal" ${(!state.analysisThesis.trim() || !state.analysisRisk.trim() || !state.analysisInvalidation.trim()) ? "disabled" : ""}>Guardar en mi diario ${icon("arrow")}</button>
+      </div>
+    </div>`;
+
+  // En modo conectado el servidor evalúa con trade_check; aquí solo se pinta.
+  function tradeCheckHtml() {
+    const tc = state.tradeCheck;
+    const err = state.tradeCheckError;
+    if (!tc && !err) return "";
+    if (err) {
+      return `<section class="card mt-24" aria-label="No se pudo evaluar"><div class="notice">${icon("info")}<p>${escapeHtml(err)}</p></div></section>`;
+    }
+    if (tc.bloqueado_por_plan) {
+      const mp = tc.modo_plan || {};
+      const pct = mp.etf_pct != null ? `${mp.etf_pct} %` : "Sin dato";
+      const meta = mp.meta_pct != null ? `${mp.meta_pct} %` : "Sin dato";
+      return `<section class="card mt-24" aria-label="El modo plan cierra esta compra">
+        <div class="section-header"><div class="section-title"><h2>El plan responde por ti</h2><p class="small muted">Sin precio descargado ni valoración: la regla es clara.</p></div>${badge("MODO PLAN", "demo")}</div>
+        <div class="notice">${icon("shield")}<p><strong>Modo plan: tu ETF está en ${escapeHtml(pct)} de tu meta de ${escapeHtml(meta)}. El próximo dinero va a ${escapeHtml(tc.etf_plan || state.etfPlan)}.</strong></p></div>
+        <ul class="kv-list">
+          <li class="kv-row"><span>Lo que falta para la meta</span><strong>${tc.plan && tc.plan.faltan_usd != null ? privateText(money(tc.plan.faltan_usd)) : "Sin dato"}</strong></li>
+          <li class="kv-row"><span>Esta operación</span><strong class="negative">No cumple la regla del plan</strong></li>
+        </ul>
+        <p class="small muted">${escapeHtml(tc.nota || "")}</p>
+        ${journalBoxHtml()}
+      </section>`;
+    }
+    const lims = Array.isArray(tc.limites) ? tc.limites : [];
+    const motor = tc.motor || {};
+    return `<section class="card mt-24" aria-label="Resultado de la evaluación">
+      <div class="section-header"><div class="section-title"><h2>Así se vería tu decisión</h2><p class="small muted">${escapeHtml(tc.nota || "Evaluación del servidor con tus datos.")}</p></div><span class="badge ${tc.cumple_limites ? "badge-green" : "badge-demo"}">${tc.cumple_limites ? "DENTRO DE LOS LÍMITES" : "REVISA LOS LÍMITES"}</span></div>
+      <div class="result-grid">
+        <div><span>Peso de ${escapeHtml(tc.ticker)}</span><strong>${tc.peso_antes_pct != null ? tc.peso_antes_pct + "%" : "Sin dato"} ${icon("arrow","icon-sm")} ${tc.peso_despues_pct != null ? tc.peso_despues_pct + "%" : "Sin dato"}</strong><small>Antes y después</small></div>
+        <div><span>Depósito necesario</span><strong>${tc.deposito_necesario > 0 ? privateText(money(tc.deposito_necesario)) : "No hace falta"}</strong><small>Si el efectivo no alcanza</small></div>
+        <div><span>El motor propone</span><strong>${escapeHtml(motor.propuesta || "Sin dato")}</strong><small>${motor.confianza ? "Confianza: " + escapeHtml(motor.confianza) : "Sin veredicto de Luna"}</small></div>
+      </div>
+      <ul class="kv-list">
+        ${lims.map(l => `<li class="kv-row"><span>${escapeHtml(l.limite)}</span><strong class="${l.cumple ? "positive" : "negative"}">${l.cumple ? "Cumple" : "No cumple"}${l.valor != null ? ` · ${l.valor}` : ""}${l.maximo != null ? ` / ${l.maximo}` : ""}</strong></li>`).join("")}
+      </ul>
+      ${tc.plan && tc.plan.aviso ? `<div class="notice">${icon("info")}<p>${escapeHtml(tc.plan.aviso)}</p></div>` : ""}
+      ${Array.isArray(motor.argumentos) && motor.argumentos.length ? `<ul class="about-list">${motor.argumentos.map(a => `<li>${escapeHtml(a)}</li>`).join("")}</ul>` : ""}
+      ${journalBoxHtml()}
+    </section>`;
+  }
+
   function renderAnalisis() {
+    const isDemo = isDemoMode();
     const ticker = state.analysisTicker.toUpperCase();
     const asset = state.assets.find(a => a.ticker === ticker);
     const value = asset ? asset.shares * asset.price : 0;
@@ -608,7 +716,7 @@
         </aside>
       </div>
 
-      ${state.analysisShow ? `
+      ${!isDemo ? tradeCheckHtml() : (state.analysisShow ? `
         <section class="card mt-24" aria-label="Resultado de la simulación">
           <div class="section-header"><div class="section-title"><h2>Así se vería tu decisión</h2><p class="small muted">Simulación ilustrativa basada en los datos actuales.</p></div><span class="badge ${after > limitPct ? "badge-demo" : "badge-green"}">${after > limitPct ? "REVISAR CONCENTRACIÓN" : "DENTRO DEL LÍMITE"}</span></div>
           <div class="result-grid">
@@ -616,19 +724,11 @@
             <div><span>Efectivo disponible</span><strong>${privateText(money(state.cash))} ${icon("arrow","icon-sm")} ${privateText(money(Math.max(0, state.cash + (state.analysisSide === "Vender" ? amountNum : -amountNum))))}</strong><small>Una compra puede requerir depositar fondos</small></div>
             <div><span>Límite por empresa</span><strong class="${after > limitPct ? "negative" : "positive"}">${after > limitPct ? `Supera el ${limitPct}%` : `Dentro del ${limitPct}%`}</strong><small>Según tu perfil actual</small></div>
           </div>
-          <div class="opinion">${icon("sparkles")}<div><strong>La segunda mirada de Luna ${isDemoMode() ? '<span class="badge badge-muted">DEMO</span>' : ""}</strong><p>${after > limitPct ? "Esta operación aumentaría tu concentración. Revisa si el tamaño de la posición refleja tu convicción y tu tolerancia al riesgo." : "La simulación no supera tu límite de concentración. Antes de decidir, comprueba el precio, tu tesis y cuánto efectivo necesitas conservar."}</p></div></div>
-          <div class="result-journal">
-            <div><h3>Deja constancia de tu decisión</h3><p>Escribe tu razonamiento ahora; podrás evaluarlo más adelante.</p></div>
-            <div class="form-stack">
-              <label class="field-label">Mi tesis<textarea class="field" id="result-thesis" placeholder="¿Por qué tiene sentido para mí?">${escapeHtml(state.analysisThesis)}</textarea></label>
-              <label class="field-label">Riesgo principal<textarea class="field" id="result-risk" placeholder="¿Qué podría salir mal?">${escapeHtml(state.analysisRisk)}</textarea></label>
-              <label class="field-label">Qué invalidaría mi idea<textarea class="field" id="result-invalidation" placeholder="¿Qué me haría cambiar de opinión?">${escapeHtml(state.analysisInvalidation)}</textarea></label>
-              <button type="button" class="btn btn-primary" data-action="save-analysis-journal" id="btn-save-analysis-journal" ${(!state.analysisThesis.trim() || !state.analysisRisk.trim() || !state.analysisInvalidation.trim()) ? "disabled" : ""}>Guardar en mi diario ${icon("arrow")}</button>
-            </div>
-          </div>
-        </section>` : ""}
+          <div class="opinion">${icon("sparkles")}<div><strong>La segunda mirada de Luna <span class="badge badge-muted">DEMO</span></strong><p>${after > limitPct ? "Esta operación aumentaría tu concentración. Revisa si el tamaño de la posición refleja tu convicción y tu tolerancia al riesgo." : "La simulación no supera tu límite de concentración. Antes de decidir, comprueba el precio, tu tesis y cuánto efectivo necesitas conservar."}</p></div></div>
+          ${journalBoxHtml()}
+        </section>` : "")}
 
-      ${advanced("Fundamentos, valuación y análisis técnico", `
+      ${!isDemo && modoPlanActivo() ? "" : advanced("Fundamentos, valuación y análisis técnico", `
         <div class="advanced-grid">
           <div><h3>Más profundidad, cuando la necesites</h3><p>DCF, múltiplos, niveles ATR y métricas técnicas requieren datos verificados. Si falta un dato, lo verás marcado como «Sin dato».</p></div>
           <div class="advanced-metrics">
@@ -675,6 +775,22 @@
       <p class="filter-status" id="filter-status" role="status" aria-live="polite"></p>
       <div class="explore-grid" id="explore-results"></div>` + footer();
     renderExploreResults();
+  }
+
+  // ---- Modo plan: las «sirenas» muestran una sola página mientras el ETF está bajo la meta ----
+  function renderModoPlanPage() {
+    const mp = state.modoPlan || {};
+    const pct = mp.etf_pct != null ? `${mp.etf_pct} %` : "Sin dato";
+    const meta = mp.meta_pct != null ? `${mp.meta_pct} %` : "Sin dato";
+    main.innerHTML = intro(
+      "MODO PLAN ACTIVO",
+      "Atado al mástil.",
+      "El plan manda: las sirenas esperan fuera."
+    ) + `
+      <section class="card section-pad">
+        <p>Tu ETF está en ${escapeHtml(pct)} de tu meta de ${escapeHtml(meta)}. El próximo dinero va al ETF del plan (${escapeHtml(state.etfPlan)}). Esta función vuelve cuando el ETF llegue a la meta.</p>
+        <div class="dialog-actions"><a class="btn btn-primary" href="#resumen">Volver al resumen ${icon("arrow")}</a></div>
+      </section>` + footer();
   }
 
   // ---- Hapi IA (Luna) ----
@@ -899,6 +1015,15 @@
   }
 
   // ---- Ajustes ----
+  const pendienteFila = (batch, kind) => {
+    if (!batch || !batch.cambios) return "";
+    const cambios = Object.entries(batch.cambios).map(([k, v]) => `${k}: ${v}`).join(" · ");
+    return `<div class="settings-warning">${icon("shield","icon-sm")} <strong>${kind === "limits" ? "Límites" : "Perfil"}:</strong> ${escapeHtml(cambios)} — pendiente hasta ${escapeHtml(String(batch.efectivo_desde || "").slice(0, 10))}.
+      <button type="button" class="btn btn-plain" data-action="cancel-pending" data-kind="${kind}">Cancelar</button></div>`;
+  };
+  const pendientesHtml = () =>
+    pendienteFila(state.settingsPendientes, "limits") + pendienteFila(state.profilePendientes, "profile");
+
   function renderAjustes() {
     const conflict = Number(state.settingsLimit) < 100 / (Number(state.settingsPositions) || 1);
     const isDemo = isDemoMode();
@@ -921,7 +1046,11 @@
         <div class="settings-row"><div><h3>Posiciones objetivo</h3><p>El número de activos que quieres mantener aproximadamente.</p></div>
           <div class="settings-number"><input type="text" inputmode="numeric" id="settings-positions" value="${escapeHtml(state.settingsPositions)}" aria-label="Número de posiciones objetivo"/></div></div>
         ${conflict ? `<div class="settings-warning">Con ${escapeHtml(state.settingsPositions)} posiciones, un límite de ${escapeHtml(state.settingsLimit)}% no permite distribuir el 100% de la cartera. Considera ajustar uno de los valores.</div>` : ""}
-        <div class="settings-save"><button type="button" class="btn btn-primary" data-action="save-settings">Guardar preferencias ${icon("arrow")}</button>${state.settingsSaved ? `<span>${icon("check","icon-sm")} Guardado</span>` : ""}</div>
+        ${!isDemo ? `
+          <label class="field-label" style="margin-top:16px">Motivo del cambio<textarea class="field" id="settings-motivo" maxlength="500" placeholder="Endurecer aplica al instante; aflojar espera 7 días y necesita tu motivo.">${escapeHtml(state.settingsMotivo)}</textarea></label>
+          ${pendientesHtml()}
+        ` : ""}
+        <div class="settings-save"><button type="button" class="btn btn-primary" data-action="save-settings">Guardar preferencias ${icon("arrow")}</button>${state.settingsSaved ? `<span>${icon("check","icon-sm")} ${escapeHtml(state.settingsNote || "Guardado")}</span>` : ""}</div>
       </section>
 
       <section class="card section-pad mt-24" aria-label="Sobre tus datos">
@@ -972,7 +1101,8 @@
         <tr><th>Estado</th><td>${isDemo ? "Sincronización por verificar" : (a.verified ? "Verificado por ti" : "Pendiente de verificación")}</td></tr>
       </tbody></table>
       <p class="detail-flag">${icon("info")} Los niveles ATR requieren precios de mercado verificados. ${statusTag}</p>
-      <div class="dialog-actions">${!isDemo && !a.verified ? `<button class="btn" data-action="verify-position" data-ticker="${escapeHtml(a.ticker)}">${icon("check")}Marcar como verificada</button>` : ""}<button class="btn" data-action="watch" data-ticker="${escapeHtml(a.ticker)}" aria-pressed="${state.watched.has(a.ticker)}">${icon(state.watched.has(a.ticker) ? "check" : "star")}${state.watched.has(a.ticker) ? "En seguimiento" : "Añadir a seguimiento"}</button><button class="btn btn-primary" data-action="analyze" data-ticker="${escapeHtml(a.ticker)}">${icon("sliders")}Simular decisión</button><button class="btn" data-action="prompt" data-prompt="¿Qué me puedes decir de ${escapeHtml(a.ticker)} en mi cartera?">${icon("sparkles")}Preguntar a Luna</button></div>`);
+      ${!isDemo && !a.verified ? `<label class="field-label" style="margin-top:12px">Evidencia de la verificación<input class="field" id="verify-evidence" type="text" maxlength="300" placeholder="Evidencia: p. ej. captura Hapi 2026-10-02" value="${escapeHtml(state.verifyEvidence)}"/></label>` : ""}
+      <div class="dialog-actions">${!isDemo && !a.verified ? `<button class="btn" data-action="verify-position" data-ticker="${escapeHtml(a.ticker)}" id="btn-verify-position" ${state.verifyEvidence.trim().length < 3 ? "disabled" : ""}>${icon("check")}Marcar como verificada</button>` : ""}<button class="btn" data-action="watch" data-ticker="${escapeHtml(a.ticker)}" aria-pressed="${state.watched.has(a.ticker)}">${icon(state.watched.has(a.ticker) ? "check" : "star")}${state.watched.has(a.ticker) ? "En seguimiento" : "Añadir a seguimiento"}</button><button class="btn btn-primary" data-action="analyze" data-ticker="${escapeHtml(a.ticker)}">${icon("sliders")}Simular decisión</button><button class="btn" data-action="prompt" data-prompt="¿Qué me puedes decir de ${escapeHtml(a.ticker)} en mi cartera?">${icon("sparkles")}Preguntar a Luna</button></div>`);
   }
 
   function openRadarAsset(ticker) {
@@ -1132,9 +1262,11 @@
     const focusId = prev && prev.id && main.contains(prev) ? prev.id : "";
     const sel = focusId && typeof prev.selectionStart === "number" ? [prev.selectionStart, prev.selectionEnd] : null;
 
-    views[state.route]();
+    const gated = modoPlanActivo() && (state.route === "explorar" || state.route === "asistente");
+    (gated ? renderModoPlanPage : views[state.route])();
     hydrateIcons(main);
     document.getElementById("crumb-current").textContent = routeLabels[state.route];
+    document.querySelectorAll('.nav-link[data-route="explorar"],.nav-link[data-route="asistente"]').forEach(a => { a.hidden = modoPlanActivo(); });
     document.querySelectorAll(".nav-link,[data-route].side-action").forEach(a => {
       if (a.dataset.route === state.route) a.setAttribute("aria-current","page"); else a.removeAttribute("aria-current");
     });
@@ -1342,11 +1474,22 @@
 
   async function verifyPosition(ticker) {
     if (!state.connected) return;
+    const evidencia = (state.verifyEvidence || "").trim();
+    if (evidencia.length < 3) { toast("Escribe la evidencia (mínimo 3 caracteres)."); return; }
     try {
-      const res = await fetch("/api/positions/" + encodeURIComponent(ticker) + "/verify", {method: "POST"});
-      if (!res.ok) throw new Error("HTTP " + res.status);
+      const res = await fetch("/api/positions/" + encodeURIComponent(ticker) + "/verify", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({evidencia}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast(detailText(data) || "No se pudo verificar la posición.");
+        return;
+      }
       const a = state.assets.find(item => item.ticker === ticker);
       if (a) a.verified = true;
+      state.verifyEvidence = "";
       toast("Posición marcada como verificada por ti.");
       await loadServerData();
       if (dialog.open) openPosition(ticker);
@@ -1354,6 +1497,38 @@
       console.warn("No se pudo verificar la posición:", err);
       toast("No se pudo verificar la posición.");
     }
+  }
+
+  // En modo conectado «Analizar decisión» llama a trade_check: el servidor
+  // evalúa con tus datos; el modo plan responde sin red.
+  async function runTradeCheck() {
+    const ticker = state.analysisTicker.toUpperCase();
+    const side = state.analysisSide === "Vender" ? "vender" : "comprar";
+    const amount = Number(state.analysisAmount) || 0;
+    state.tradeCheckBusy = true;
+    state.tradeCheck = null;
+    state.tradeCheckError = "";
+    renderRoute();
+    try {
+      const res = await fetch("/api/trade_check", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ticker, side, amount_usd: amount}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        state.tradeCheck = data;
+      } else {
+        const detail = data && data.detail;
+        state.tradeCheckError = (detail && typeof detail === "object" ? detail.message : detail)
+          || "No se pudo evaluar la operación.";
+      }
+    } catch (err) {
+      console.warn("trade_check falló:", err);
+      state.tradeCheckError = "Sin conexión con el backend local.";
+    }
+    state.tradeCheckBusy = false;
+    renderRoute();
   }
 
   async function saveAnalysisJournal() {
@@ -1382,19 +1557,39 @@
     renderRoute();
   }
 
+  const detailText = data => {
+    const d = data && data.detail;
+    return (d && typeof d === "object" ? d.message : d) || "";
+  };
+
   async function saveSettings() {
     state.settingsSaved = true;
     if (state.connected) {
       try {
+        const motivo = state.settingsMotivo.trim();
         const lim = Number(state.settingsLimit);
         const pos = Number(state.settingsPositions);
         const limitsBody = {};
         if (lim > 0) limitsBody.max_position_pct = lim;
         if (pos >= 1) limitsBody.positions_target = pos;
-        const calls = [fetch("/api/profile", {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({nivel_riesgo: state.settingsRisk})})];
-        if (Object.keys(limitsBody).length) calls.push(fetch("/api/limits", {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify(limitsBody)}));
-        await Promise.all(calls);
-        toast("Preferencias guardadas en tu base de datos.");
+        const calls = [fetch("/api/profile", {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({nivel_riesgo: state.settingsRisk, motivo})})];
+        if (Object.keys(limitsBody).length) calls.push(fetch("/api/limits", {method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({...limitsBody, motivo})}));
+        const results = await Promise.all(calls.map(async res => ({ok: res.ok, data: await res.json().catch(() => ({}))})));
+        const error = results.find(r => !r.ok);
+        if (error) {
+          state.settingsSaved = false;
+          toast(detailText(error.data) || "No se pudieron guardar los ajustes.");
+          renderRoute();
+          return;
+        }
+        const profileRes = results[0].data;
+        const limitsRes = results.length > 1 ? results[1].data : null;
+        state.profilePendientes = (profileRes && profileRes.pendientes) || null;
+        if (limitsRes) state.settingsPendientes = limitsRes.pendientes || null;
+        const pend = [profileRes, limitsRes].map(r => r && r.pendientes && r.pendientes.efectivo_desde).find(Boolean);
+        state.settingsNote = pend ? `pendiente hasta ${String(pend).slice(0, 10)}` : "Guardado";
+        state.settingsMotivo = "";
+        toast(pend ? "El cambio que afloja quedó pendiente 7 días." : "Preferencias guardadas en tu base de datos.");
         renderRoute();
         return;
       } catch (err) {
@@ -1402,6 +1597,24 @@
       }
     }
     toast("Preferencias guardadas para esta sesión de demostración.");
+    renderRoute();
+  }
+
+  async function cancelPending(kind) {
+    if (!state.connected) return;
+    try {
+      const res = await fetch(`/api/${kind === "limits" ? "limits" : "profile"}/pendientes`, {method:"DELETE"});
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        if (kind === "limits") state.settingsPendientes = null; else state.profilePendientes = null;
+        toast("Cambio pendiente cancelado.");
+      } else {
+        toast(detailText(data) || "No había cambio pendiente.");
+      }
+    } catch (err) {
+      console.warn("No se pudo cancelar:", err);
+      toast("No se pudo cancelar el cambio pendiente.");
+    }
     renderRoute();
   }
 
@@ -1459,8 +1672,8 @@
       case "save-sync": saveSync(); break;
       case "add-cash": state.cash += 50; toast("Se agregaron $50.00 de efectivo de demostración."); renderRoute(); break;
 
-      case "side": state.analysisSide = el.dataset.side; state.analysisShow = false; renderRoute(); break;
-      case "amount": state.analysisAmount = el.dataset.amt; state.analysisShow = false; renderRoute(); break;
+      case "side": state.analysisSide = el.dataset.side; state.analysisShow = false; state.tradeCheck = null; state.tradeCheckError = ""; renderRoute(); break;
+      case "amount": state.analysisAmount = el.dataset.amt; state.analysisShow = false; state.tradeCheck = null; state.tradeCheckError = ""; renderRoute(); break;
       case "save-analysis-journal": saveAnalysisJournal(); break;
 
       case "cancel-savings-draft": state.homeDraft = null; renderRoute(); break;
@@ -1474,6 +1687,7 @@
       case "save-review": saveReview(); break;
 
       case "save-settings": saveSettings(); break;
+      case "cancel-pending": cancelPending(el.dataset.kind); break;
       case "refresh-data": state.loading = true; renderRoute(); loadServerData(); break;
       case "open-reset": openReset(); break;
       case "confirm-reset": confirmReset(); break;
@@ -1493,8 +1707,10 @@
     else if (t.id === "sync-ticker") { state.portfolioTicker = t.value.toUpperCase(); renderRoute(); }
     else if (t.id === "sync-shares") { state.portfolioShares = cleanNum(t.value); renderRoute(); }
     else if (t.id === "sync-price") { state.portfolioPrice = cleanNum(t.value); renderRoute(); }
-    else if (t.id === "analysis-ticker") { state.analysisTicker = t.value.toUpperCase(); state.analysisShow = false; renderRoute(); }
-    else if (t.id === "analysis-amount") { state.analysisAmount = cleanNum(t.value); state.analysisShow = false; renderRoute(); }
+    else if (t.id === "analysis-ticker") { state.analysisTicker = t.value.toUpperCase(); state.analysisShow = false; state.tradeCheck = null; state.tradeCheckError = ""; renderRoute(); }
+    else if (t.id === "analysis-amount") { state.analysisAmount = cleanNum(t.value); state.analysisShow = false; state.tradeCheck = null; state.tradeCheckError = ""; renderRoute(); }
+    else if (t.id === "verify-evidence") { state.verifyEvidence = t.value; const b = document.getElementById("btn-verify-position"); if (b) b.disabled = t.value.trim().length < 3; }
+    else if (t.id === "settings-motivo") { state.settingsMotivo = t.value; state.settingsSaved = false; }
     else if (t.id === "journal-ticker") state.journalTicker = t.value.toUpperCase();
     else if (t.id === "journal-thesis") state.journalThesis = t.value;
     else if (t.id === "journal-risk") state.journalRisk = t.value;
@@ -1528,7 +1744,11 @@
       const m = state.homeSavingText.replace(",", ".").match(/\d+(?:\.\d{1,2})?/);
       if (m && Number(m[0]) > 0) { state.homeDraft = Number(m[0]); state.homeReviewed = false; renderRoute(); }
     }
-    else if (event.target.id === "form-analysis") { event.preventDefault(); state.analysisShow = true; renderRoute(); }
+    else if (event.target.id === "form-analysis") {
+      event.preventDefault();
+      if (state.connected) runTradeCheck();
+      else { state.analysisShow = true; renderRoute(); }
+    }
     else if (event.target.id === "form-flow") { event.preventDefault(); requestFlowDraft(); }
     else if (event.target.id === "form-journal") {
       event.preventDefault();

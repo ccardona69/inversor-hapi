@@ -55,6 +55,24 @@ reversión. Las decisiones se agregan al final; no se editan.
   (PBKDF2, 100k iteraciones). La clave se entregó al usuario una vez y no está
   guardada en el repo ni en el VPS. Automatización periódica sigue pendiente.
 
+## D-06 — 2026-10-02 — Plan AWS: decisión pospuesta
+
+- **Decisión:** no elegir aún entre escenarios A–C de §5.2 (Paid + t4g.small,
+  Paid + t4g.micro, solo local + túnel); la decisión queda pendiente con fecha
+  límite 2027-04-01 (vencimiento del Free plan, HV consola AWS).
+- **Motivo:** margen de ≈ 6 meses; el backup cifrado fuera de AWS (D-05) ya
+  elimina el riesgo urgente de pérdida de datos.
+- **Reversión:** registrar la decisión elegida antes del 2027-04-01; una
+  migración a local requiere su propia entrada y prueba de funcionamiento.
+
+## D-07 — 2026-10-02 — Paquetes «Ulises» P1–P6 sin aprobar
+
+- **Decisión:** ningún paquete aprobado por ahora; queda vigente el orden de
+  evaluación P1 → P4 → P3 → P6 → P2 → P5.
+- **Motivo:** el usuario prefiere revisar antes de autorizar implementación.
+- **Estado:** pendiente. Cada paquete requiere aprobación explícita (regla
+  dura 9); sin aprobación no se escribe código.
+
 ## D-06 — 2026-10-02 — Corrección de 4 bugs del frontend (E2E)
 
 - **Decisión:** corregir los 4 bugs confirmados en la prueba de punta a punta
@@ -90,3 +108,68 @@ reversión. Las decisiones se agregan al final; no se editan.
   VERIFICAR»; verificada sin precio → «SIN COTIZACIÓN» — así no contradice a
   «Verificado por ti».
 - **Reversión:** revertir el commit correspondiente en `static/app.js`.
+
+## D-08 — 2026-10-02 — Plan en una línea (Paso 0)
+
+- **Decisión:** «Todo dinero nuevo va a SPY hasta que el ETF llegue al 50 % de
+  la cartera». ETF elegido de forma explícita: SPY (era el valor por defecto).
+  Se descartó SPYG: ≈ 53 % tecnología y ≈ 54 % en el mismo grupo correlacionado
+  que AMZN/GOOG (HR, ficha SSGA 2026-09-01); no diversifica.
+- **Rebalanceo:** no vender. La meta se alcanza solo con dinero nuevo (≈ 8
+  aportes ≈ 4 años, EST a precios constantes). Impuesto en Perú: SIN DATO.
+- **Acciones del usuario fuera del sistema (pendientes, HR al confirmarse):**
+  persona de confianza con regla de 72 h para cualquier compra que no sea el
+  ETF; transferencia automática del banco el día de pago; comparar tipo de
+  cambio banco vs casas de cambio; preguntar a Hapi por depósitos directos en
+  USD; alerta de presupuesto en Azure.
+- **Reversión:** nueva entrada con fecha y motivo.
+
+## D-09 — 2026-10-02 — Modo plan (P1)
+
+- **Decisión:** mientras el ETF esté bajo la meta (o sin dato), el sistema
+  cierra las «sirenas»: radar, pulso, niveles ATR, DCF/técnica, Luna (chat,
+  segunda opinión, explicación, cuestionar tesis) y fundamentales por red
+  (409). Sin interruptor: se apaga solo al llegar a la meta. La lectura de
+  capturas (cartera, movimientos, órdenes) sigue. «¿Compro o vendo?» llama a
+  trade_check; una compra de acción se rechaza sin red. Se retira el texto fijo
+  que se mostraba como «segunda mirada de Luna» con datos reales.
+- **Consecuencia aceptada:** a la cadencia actual el modo plan dura ≈ 4 años.
+- **Verificación:** `tests/test_modo_plan.py`; suite 353 verdes.
+- **Reversión:** revertir los cambios en `app/brecha.py` (modo_plan),
+  `app/routes/marcador.py` (bloquear_en_modo_plan) y las dependencias en
+  radar/market/ai/decisions; `static/app.js`.
+
+## D-10 — 2026-10-02 — Cuerdas: límites y perfil con enfriamiento (P6)
+
+- **Decisión:** endurecer aplica al instante; aflojar espera 7 días, exige
+  motivo y queda en el Diario (con fecha de revisión). Cancelar es inmediato.
+  Claves y rangos validados (`app/cuerdas.py`).
+- **Huecos conocidos:** primer valor de un campo de perfil vacío aplica al
+  instante; `delete_all` borra settings sin enfriamiento.
+- **Verificación:** `tests/test_cuerdas.py`.
+- **Reversión:** revertir `app/cuerdas.py` y los PUT de limits/profile.
+
+## D-11 — 2026-10-02 — Verificación con evidencia (P3)
+
+- **Decisión:** se elimina `POST /api/positions/verify_all`. Verificar una
+  posición exige un texto de evidencia (3–300) que queda fechado en `notes`.
+- **Reversión:** revertir `app/routes/portfolio.py`.
+
+## D-12 — 2026-10-02 — Tope duro de IA (P4)
+
+- **Decisión:** 30 llamadas al mes, contadas antes de tocar la red en
+  `ai_provider.request` (settings `ia_uso` / `ia_tope_mensual`, sin escritor
+  por API). Se cuenta por llamada: el costo por token es SIN DATO.
+- **Reversión:** revertir `consumir_presupuesto` en `app/ai_provider.py`.
+
+## D-13 — 2026-10-02 — Medir y fijar el corte (Paso 3)
+
+- **Decisión:** `GET /api/metricas` mide solo cuatro cosas: % de ETF, costo
+  por depósito, % de compras (USD) al ETF desde 2026-10-02 y costo anual de la
+  herramienta como % de la cartera (HR vía `PUT /api/metricas/costo_sistema`).
+- **Congelamiento:** sin funciones nuevas hasta 6 depósitos seguidos al ETF.
+- **Criterio de abandono:** revisión el 2027-01-02; si para entonces no se usa
+  el día del depósito, se archiva y queda la versión mínima (hoja de 5 filas
+  + un ETF).
+- **AWS:** recordatorio de decisión de plan el 2027-03-01 (vence 2027-04-01,
+  D-06).

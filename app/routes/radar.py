@@ -16,6 +16,7 @@ from .. import risk as RK
 from .. import secdata as SEC
 from .. import tradesync as TS
 from ..deps import conn_dep, current_user
+from .marcador import bloquear_en_modo_plan
 from .market import _sec_fundamentals, store_quote
 from .portfolio import position_rows
 
@@ -36,7 +37,7 @@ def _radar_tickers(conn, uid):
     return tickers, cand_by_tk, pos_by_tk
 
 
-@router.get("/api/radar")
+@router.get("/api/radar", dependencies=[Depends(bloquear_en_modo_plan)])
 def radar_get(uid: int = Depends(current_user), conn=Depends(conn_dep)):
     """Solo datos guardados: nunca llama a Yahoo ni a la SEC."""
     tickers, cand_by_tk, pos_by_tk = _radar_tickers(conn, uid)
@@ -88,7 +89,7 @@ def _refresh_one(tk, conn, uid):
     return precio, nuevo_fund, errores
 
 
-@router.post("/api/radar/refresh")
+@router.post("/api/radar/refresh", dependencies=[Depends(bloquear_en_modo_plan)])
 def radar_refresh(uid: int = Depends(current_user), conn=Depends(conn_dep)):
     tickers, _, _ = _radar_tickers(conn, uid)
     precios, nuevos, errores = 0, 0, []
@@ -101,7 +102,7 @@ def radar_refresh(uid: int = Depends(current_user), conn=Depends(conn_dep)):
             "errores": errores}
 
 
-@router.post("/api/radar/{ticker}")
+@router.post("/api/radar/{ticker}", dependencies=[Depends(bloquear_en_modo_plan)])
 def radar_add(ticker: str, uid: int = Depends(current_user), conn=Depends(conn_dep)):
     """El usuario solo escribe el ticker: se agrega a su watchlist (candidates)
     y el sistema descarga su precio y sus fundamentales del 10-K."""

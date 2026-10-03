@@ -9,6 +9,11 @@ from app import ai_provider as AP
 from app import db as D
 from app.main import app
 
+# La suite previa prueba el interior de las funciones; la puerta del
+# modo plan (409 con el ETF bajo la meta) se abre con el estado inactivo.
+pytestmark = pytest.mark.usefixtures("sin_modo_plan")
+
+
 
 CONFIG = {"INVERSOR_AI_API_KEY": "clave-de-prueba", "INVERSOR_AI_MODEL": "gpt-5.6-luna",
           "INVERSOR_AI_BASE_URL": "https://recurso.services.ai.azure.com/foundry/openai/v1",

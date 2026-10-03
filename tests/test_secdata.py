@@ -13,6 +13,11 @@ from app import db as D
 from app import secdata as SEC
 from app.main import app
 
+# La suite previa prueba el interior de las funciones; la puerta del
+# modo plan (409 con el ETF bajo la meta) se abre con el estado inactivo.
+pytestmark = pytest.mark.usefixtures("sin_modo_plan")
+
+
 ACC = "0000-00-000010"      # accn del 10-K más reciente
 OTHER = "0000-00-000001"    # otra presentación: sus valores deben ignorarse
 AMD = "0000-00-000011"      # accn de un 10-K/A posterior: debe ignorarse

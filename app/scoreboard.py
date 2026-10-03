@@ -21,6 +21,9 @@ SETTINGS_DEFAULTS = {
     "w8ben_expiry": None,            # vencimiento del W-8BEN (YYYY-MM-DD)
     "last_hapi_check": None,         # última entrada a Hapi (actividad = login)
     "ahorro_mensual_declarado": 80,  # ESTIMACIÓN mientras haya <2 meses de datos
+    "plan_inicio": "2026-10-02",     # desde qué fecha cuentan las compras al plan
+    "revision_abandono": "2027-01-02",  # fecha de revisión de abandono del plan
+    "costo_sistema_mensual_usd": None,  # costo mensual de la herramienta (HR)
 }
 
 ETF_TICKERS = frozenset(

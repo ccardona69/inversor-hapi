@@ -12,6 +12,11 @@ from app import tradesync as TS
 from app import ai_review as RV
 from app.main import app
 
+# La suite previa prueba el interior de las funciones; la puerta del
+# modo plan (409 con el ETF bajo la meta) se abre con el estado inactivo.
+pytestmark = pytest.mark.usefixtures("sin_modo_plan")
+
+
 
 @pytest.fixture
 def session(tmp_path, monkeypatch):
@@ -122,7 +127,8 @@ def test_reconcile_requires_complete_traceable_ledger_and_verified_qty(session):
     assert import_rows(alice, [trade()]).status_code == 200
     endpoint = "/api/trades/AAA/reconcile"
     assert alice.post(endpoint, json={"complete_history": True}).status_code == 400
-    assert alice.post("/api/positions/AAA/verify").status_code == 200
+    assert alice.post("/api/positions/AAA/verify",
+                      json={"evidencia": "captura de prueba"}).status_code == 200
     assert alice.post(endpoint, json={"complete_history": False}).status_code == 400
     assert alice.post(endpoint, json={"complete_history": True}).status_code == 400
     preview = alice.post(endpoint, json={"complete_history": True, "confirmed_qty": "2"})
@@ -153,7 +159,8 @@ def test_reconcile_never_applies_an_unreviewed_updated_ledger(session):
     alice = session
     assert alice.post("/api/positions", json={"ticker": "AAA", "qty": 2,
                                                "avg_cost": 10, "source": "Hapi"}).status_code == 200
-    assert alice.post("/api/positions/AAA/verify").status_code == 200
+    assert alice.post("/api/positions/AAA/verify",
+                      json={"evidencia": "captura de prueba"}).status_code == 200
     assert import_rows(alice, [trade()]).status_code == 200
     endpoint = "/api/trades/AAA/reconcile"
     body = {"complete_history": True, "confirmed_qty": "2"}
@@ -176,7 +183,8 @@ def test_reconcile_never_applies_an_unreviewed_updated_ledger(session):
 def test_reconcile_blocks_missing_provenance_oversell_ambiguity_and_qty_mismatch(session):
     alice = session
     assert alice.post("/api/positions", json={"ticker": "AAA", "qty": 2, "source": "manual"}).status_code == 200
-    assert alice.post("/api/positions/AAA/verify").status_code == 200
+    assert alice.post("/api/positions/AAA/verify",
+                      json={"evidencia": "captura de prueba"}).status_code == 200
     assert import_rows(alice, [trade()]).status_code == 200
     endpoint = "/api/trades/AAA/reconcile"
     conn = D.get_db()

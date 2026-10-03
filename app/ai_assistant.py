@@ -7,6 +7,7 @@ import unicodedata
 from . import ai_provider as AP
 from . import analysis as AN
 from . import brecha as BR
+from . import cuerdas as CU
 from . import db as D
 from . import marketpulse as MP
 from . import risk as RK
@@ -149,7 +150,7 @@ def _niveles_posicion(ticker, n_posiciones):
 def context_for_user(conn, uid, positions, risk, alerts=None, plan=None):
     """Prepara datos acotados del usuario, sin credenciales ni registros de otros usuarios."""
     cash = conn.execute("SELECT amount, currency, updated_at FROM cash WHERE user_id=?", (uid,)).fetchone()
-    profile = D.get_setting(conn, uid, "risk_profile", {}) or {}
+    profile = CU.perfil_efectivo(conn, uid)
     weights = {w["ticker"]: w["peso_pct"] for w in (risk.get("pesos") or [])}
     facts = []
     for p in positions[:40]:
@@ -199,7 +200,7 @@ def context_for_user(conn, uid, positions, risk, alerts=None, plan=None):
             prop = {}
         proposals.append({"ticker": row["ticker"], "propuesta": prop.get("decision"),
                           "confianza": prop.get("confianza"), "fecha": row["created_at"]})
-    limits = {**RK.DEFAULT_LIMITS, **(D.get_setting(conn, uid, "limits", {}) or {})}
+    limits = CU.limites_efectivos(conn, uid)
     return {
         "alertas": [{"nivel": a["level"], "texto": _short(a["text"], 300)}
                     for a in (alerts or [])[:15]],

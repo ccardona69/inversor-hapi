@@ -111,6 +111,21 @@ def brecha(*, valor_base, valor_etf, meta_pct, a_invertir_usd=0.0, entra_a_base=
             "margen_acciones_usd": (round(max(0.0, E / t - B), 2) if t > 0 else None)}
 
 
+def modo_plan(etf_pct, meta_pct):
+    """Modo plan: con el ETF bajo la meta (o sin dato de exposición), las
+    funciones de «sirenas» — radar, pulso, niveles, Luna, fundamentales por
+    red — quedan cerradas. Fail-closed igual que la regla: sin dato cuenta
+    como bajo la meta."""
+    activo = not (etf_pct is not None and meta_pct is not None
+                  and etf_pct >= meta_pct)
+    motivo = None
+    if activo:
+        motivo = ("ETF bajo la meta del plan" if etf_pct is not None
+                  else "sin dato de exposición: cuenta como bajo la meta")
+    return {"activo": activo, "etf_pct": etf_pct, "meta_pct": meta_pct,
+            "motivo": motivo}
+
+
 def proyeccion(*, brecha_usd, meta_pct, aporte_tipico_usd, meses_por_deposito,
                aporte_alternativo_usd=None):
     """Las tres rutas para cerrar la brecha, sin preseleccionar ninguna.

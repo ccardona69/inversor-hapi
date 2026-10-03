@@ -14,6 +14,7 @@ from .. import marketpulse as MP
 from .. import secdata as SEC
 from .. import tradesync as TS
 from ..deps import _photo_input, conn_dep, current_user
+from .marcador import bloquear_en_modo_plan
 from .portfolio import position_rows
 
 router = APIRouter()
@@ -73,12 +74,12 @@ def _clear_cache():
     MP._clear_cache()
 
 
-@router.get("/api/market/pulse")
+@router.get("/api/market/pulse", dependencies=[Depends(bloquear_en_modo_plan)])
 def market_pulse(uid: int = Depends(current_user)):
     return MP.cached_pulse()
 
 
-@router.get("/api/levels/{ticker}")
+@router.get("/api/levels/{ticker}", dependencies=[Depends(bloquear_en_modo_plan)])
 def levels_get(ticker: str, uid: int = Depends(current_user), conn=Depends(conn_dep)):
     tk = ticker.strip().upper()
     if not TS.TICKER.fullmatch(tk):
@@ -123,7 +124,7 @@ def fundamentals_put(ticker: str, body: FundamentalsIn, uid: int = Depends(curre
 
 # ---------- importaciones confirmadas por el usuario (Luna solo propone) ----------
 
-@router.post("/api/fundamentals/photo/analyze")
+@router.post("/api/fundamentals/photo/analyze", dependencies=[Depends(bloquear_en_modo_plan)])
 def fundamentals_photo_analyze(body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep)):
     image, mime = _photo_input(body)
     try:
@@ -187,7 +188,7 @@ def _sec_fundamentals(tk, conn, uid):
     return {**result, "source": source}
 
 
-@router.post("/api/fundamentals/{ticker}/sec")
+@router.post("/api/fundamentals/{ticker}/sec", dependencies=[Depends(bloquear_en_modo_plan)])
 def fundamentals_sec(ticker: str, body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep)):
     """Carga los fundamentales del 10-K más reciente publicado en la SEC."""
     tk = ticker.strip().upper()

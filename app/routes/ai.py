@@ -9,7 +9,7 @@ from .. import ai_assistant as AI
 from .. import db as D
 from ..deps import conn_dep, current_user
 from .decisions import alerts, risk_get
-from .marcador import estado_plan
+from .marcador import bloquear_en_modo_plan, estado_plan
 from .portfolio import enrich_positions
 
 router = APIRouter()
@@ -25,7 +25,7 @@ class AssistantQuestion(BaseModel):
     history: list[Turn] = Field(default_factory=list, max_length=8)
 
 
-@router.post("/api/assistant/ask")
+@router.post("/api/assistant/ask", dependencies=[Depends(bloquear_en_modo_plan)])
 def assistant_ask(body: AssistantQuestion, uid: int = Depends(current_user), conn=Depends(conn_dep)):
     question = body.question.strip()
     if not question:

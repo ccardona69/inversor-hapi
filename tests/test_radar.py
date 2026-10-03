@@ -16,6 +16,11 @@ from app import secdata as SEC
 from app import tradesync as TS
 from app.main import app
 
+# La suite previa prueba el interior de las funciones; la puerta del
+# modo plan (409 con el ETF bajo la meta) se abre con el estado inactivo.
+pytestmark = pytest.mark.usefixtures("sin_modo_plan")
+
+
 
 @pytest.fixture
 def isolated(tmp_path, monkeypatch):

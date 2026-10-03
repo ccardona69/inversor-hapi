@@ -16,14 +16,18 @@ import binascii
 import json
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
 
+from . import db as D
+
 APP_ROOT = Path(__file__).resolve().parent.parent
 SECRETS_FILE = APP_ROOT / ".secrets" / "ai.env"
 DEFAULT_API_VERSION = "2024-06-01"
+IA_TOPE_MENSUAL_DEFAULT = 30
 
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_BYTES = 6 * 1024 * 1024
@@ -65,6 +69,54 @@ def load_config(env=None):
     }
 
 
+def _tope_mensual(conn, uid):
+    tope = D.get_setting(conn, uid, "ia_tope_mensual", IA_TOPE_MENSUAL_DEFAULT)
+    if isinstance(tope, bool) or not isinstance(tope, int) or tope <= 0:
+        return IA_TOPE_MENSUAL_DEFAULT
+    return tope
+
+
+def _uso_mes(conn, uid, mes):
+    uso = D.get_setting(conn, uid, "ia_uso", {}) or {}
+    llamadas = uso.get("llamadas", 0) if isinstance(uso, dict) and uso.get("mes") == mes else 0
+    return {"mes": mes, "llamadas": llamadas, "tope": _tope_mensual(conn, uid)}
+
+
+def consumir_presupuesto(now=None):
+    """Tope mensual duro sobre TODA llamada al proveedor (visión y texto).
+
+    Se descuenta antes de tocar la red y cuenta intentos, no aciertos: la
+    cuerda es sobre el gasto, no sobre el resultado. BEGIN IMMEDIATE para que
+    dos solicitudes simultáneas no repartan el mismo cupo. Vive en settings
+    (ia_uso / ia_tope_mensual); el tope solo se cambia a mano en la base."""
+    mes = (now or datetime.now(timezone.utc)).strftime("%Y-%m")
+    conn = D.get_db()
+    try:
+        uid = D.local_user_id(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        uso = _uso_mes(conn, uid, mes)
+        if uso["llamadas"] >= uso["tope"]:
+            conn.rollback()
+            raise AIProviderError(f"Tope mensual de IA alcanzado ({uso['llamadas']} llamadas en {mes}). "
+                                  "Se reinicia el día 1 del próximo mes.")
+        D.set_setting(conn, uid, "ia_uso", {"mes": mes, "llamadas": uso["llamadas"] + 1})
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _uso_mes_actual(now=None):
+    mes = (now or datetime.now(timezone.utc)).strftime("%Y-%m")
+    try:
+        conn = D.get_db()
+        try:
+            return _uso_mes(conn, D.local_user_id(conn), mes)
+        finally:
+            conn.close()
+    except Exception:
+        return {"mes": mes, "llamadas": None, "tope": IA_TOPE_MENSUAL_DEFAULT}
+
+
 def config_status(env=None):
     cfg = load_config(env)
     from_env = bool((os.environ.get("INVERSOR_AI_API_KEY") or "").strip())
@@ -75,6 +127,7 @@ def config_status(env=None):
         "base_url": cfg["base_url"],
         "model": cfg["model"],
         "api_style": cfg["api_style"],
+        "uso_mes": _uso_mes_actual(),
         "hint": "" if configured else
         "Configura INVERSOR_AI_API_KEY, INVERSOR_AI_BASE_URL e INVERSOR_AI_MODEL "
         f"(env o {SECRETS_FILE}) y reinicia el servidor.",
@@ -167,6 +220,7 @@ def request(instructions, user_text, *, image_b64=None, mime=None, env=None, cli
     if not all(cfg[k] for k in ("api_key", "base_url", "model")):
         raise AIProviderError("IA no configurada: revisa INVERSOR_AI_API_KEY, "
                               "INVERSOR_AI_BASE_URL e INVERSOR_AI_MODEL")
+    consumir_presupuesto()  # tope mensual: después de la config, antes de la red
     url, headers, style = endpoint(cfg)
     if image_b64 is None:
         image_url = None

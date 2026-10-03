@@ -84,6 +84,7 @@
     .nav-link[aria-current="page"] { background: #2b493c; color: #f4faf5; }
     .nav-link[aria-current="page"]::before { content: ""; position: absolute; left: -16px; height: 24px; width: 3px; border-radius: 0 3px 3px 0; background: #c4ddcc; }
     .nav-link .nav-dot { width: 6px; height: 6px; border-radius: 50%; background: #c4ddcc; margin-left: auto; }
+    .nav-link[hidden] { display: none; }
     .sidebar-bottom { margin-top: auto; padding-top: 48px; }
     .sidebar-note { margin: 0 4px 20px; padding: 16px; border: 1px solid #3b5949; border-radius: 8px; }
     .sidebar-note > .icon { margin-bottom: 12px; color: #c1dccb; }

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from .. import ai_review as RV
 from .. import analysis as AN
 from .. import brecha as BR
+from .. import cuerdas as CU
 from .. import db as D
 from .. import decisions as DE
 from .. import marketdata as MD
@@ -20,6 +21,8 @@ from .. import scoreboard as SB
 from .. import secdata as SEC
 from .. import tradesync as TS
 from ..deps import DISCLAIMER, conn_dep, current_user
+from . import marcador as MARC
+from .marcador import bloquear_en_modo_plan
 from .market import _sec_fundamentals, store_quote
 from .portfolio import cash_unsupported, enrich_positions, portfolio, without_current_value
 
@@ -54,7 +57,19 @@ class CandidateIn(BaseModel):
 
 @router.post("/api/analysis/{ticker}")
 def analyze(ticker: str, body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    """Modo plan: con el ETF bajo la meta, el análisis completo de una acción
+    individual también es sirena (409). El ETF del plan sí se analiza."""
     tk = ticker.upper()
+    mp = MARC.modo_plan_estado(conn, uid)
+    if mp["activo"] and tk not in SB.ETF_META:
+        etf_plan = D.get_setting(conn, uid, "etf_plan", SB.SETTINGS_DEFAULTS["etf_plan"])
+        raise HTTPException(409, MARC.modo_plan_detalle(mp, etf_plan))
+    return _analysis_report(tk, body, uid, conn, completo=True)
+
+
+def _analysis_report(tk, body, uid, conn, *, completo=True):
+    """Cuerpo del análisis: con completo=False no se descarga el histórico
+    (technical=None); lo usa trade_check en modo plan."""
     positions = enrich_positions(conn, uid)
     pos = next((p for p in positions if p["ticker"] == tk), None)
     frow = conn.execute("SELECT * FROM fundamentals WHERE user_id=? AND ticker=?", (uid, tk)).fetchone()
@@ -83,16 +98,17 @@ def analyze(ticker: str, body: dict, uid: int = Depends(current_user), conn=Depe
     scen = AN.valuation_scenarios(price, fund, body.get("assumptions"))
 
     technical = None
-    try:
-        hist = MD.fetch_history(tk)
-        technical = MD.technical_summary(hist["rows"], price, price_row.get("day_change_pct"))
-        technical["fuente"] = hist["source"]
-        technical["obtenido"] = hist["fetched_at"]
-    except MD.MarketDataError as e:
-        technical = {"error": str(e)}
+    if completo:
+        try:
+            hist = MD.fetch_history(tk)
+            technical = MD.technical_summary(hist["rows"], price, price_row.get("day_change_pct"))
+            technical["fuente"] = hist["source"]
+            technical["obtenido"] = hist["fetched_at"]
+        except MD.MarketDataError as e:
+            technical = {"error": str(e)}
 
-    prof = D.get_setting(conn, uid, "risk_profile", {}) or {}
-    limits = D.get_setting(conn, uid, "limits", {}) or {}
+    prof = CU.perfil_efectivo(conn, uid)
+    limits = CU.limites_efectivos(conn, uid)
     cash_row = conn.execute("SELECT amount FROM cash WHERE user_id=?", (uid,)).fetchone()
     total = sum(p["market_value"] or 0 for p in positions) + (cash_row["amount"] if cash_row else 0)
     weight = round((pos["market_value"] or 0) / total * 100, 2) if pos and total else None
@@ -160,7 +176,7 @@ def decisions_list(uid: int = Depends(current_user), conn=Depends(conn_dep)):
     return {"decisions": [{**dict(r), "proposal": json.loads(r["proposal"])} for r in rows]}
 
 
-@router.post("/api/decisions/{did}/explain")
+@router.post("/api/decisions/{did}/explain", dependencies=[Depends(bloquear_en_modo_plan)])
 def decision_explain(did: int, uid: int = Depends(current_user), conn=Depends(conn_dep)):
     row = conn.execute("SELECT proposal FROM decisions WHERE id=? AND user_id=?", (did, uid)).fetchone()
     if not row:
@@ -210,6 +226,33 @@ def trade_check(body: TradeCheckIn, uid: int = Depends(current_user), conn=Depen
         raise HTTPException(400, "El monto debe ser un número positivo y finito")
     amount = body.amount_usd
 
+    # Modo plan: con el ETF bajo la meta, una compra de acción individual se
+    # responde de forma determinista y sin red — no se descarga precio ni se
+    # calcula valoración, y no queda decisión registrada.
+    mp = MARC.modo_plan_estado(conn, uid)
+    if mp["activo"] and body.side == "comprar" and tk not in SB.ETF_META:
+        e = MARC.estado_plan(conn, uid)
+        target = e["etf_target_pct"]
+        plan = BR.regla_plan(tickers=[tk], lado="comprar", meta_pct=target,
+                             valor_etf=e["valor_etf_usd"], valor_base=e["valor_base_usd"],
+                             monto_usd=amount, delta_base=amount)
+        if plan["aplica"] and not plan["cumple"]:
+            pct = (f"{plan['etf_pct_antes']:g} %" if plan["etf_pct_antes"] is not None
+                   else "sin dato")
+            plan["aviso"] = (f"ETF en {pct} de tu meta de {target:g} %: por la regla "
+                             "del plan el próximo dinero va al ETF.")
+        plan["faltan_usd"] = BR.brecha(valor_base=e["valor_base_usd"] or 0.0,
+                                      valor_etf=e["valor_etf_usd"] or 0.0,
+                                      meta_pct=target)["brecha_usd"]
+        return {"operacion": body.side, "ticker": tk, "monto_usd": amount,
+                "modo_plan": mp, "plan": plan, "bloqueado_por_plan": True,
+                "cumple_limites": False,
+                "limites": [{"limite": "Meta ETF del plan", "valor": plan["etf_pct_antes"],
+                             "maximo": target, "cumple": False}],
+                "etf_plan": e["etf_plan"], "decision_id": None, "fecha": D.now(),
+                "nota": "Modo plan: con el ETF bajo su meta, el próximo dinero va al ETF "
+                        "del plan. No se descargó precio ni se calculó valoración."}
+
     # Precio vivo del ticker y de todas las posiciones (cada cotización queda guardada).
     for t in sorted({p["ticker"] for p in enrich_positions(conn, uid)} | {tk}):
         try:
@@ -228,16 +271,20 @@ def trade_check(body: TradeCheckIn, uid: int = Depends(current_user), conn=Depen
         if amount > pos_value + 0.01:
             raise HTTPException(400, f"Solo tienes $ {pos_value:.2f} en {tk}.")
 
-    # Fundamentales: solo si faltan; nunca reemplaza los existentes.
+    # En modo plan (venta de acción o compra del ETF del plan) no se descarga
+    # nada más: sin SEC ni histórico, y las secciones de valoración quedan None.
+    en_modo_plan = mp["activo"]
     fundamentales_nota = None
-    if not conn.execute("SELECT 1 FROM fundamentals WHERE user_id=? AND ticker=?",
-                        (uid, tk)).fetchone():
+    if not en_modo_plan and not conn.execute(
+            "SELECT 1 FROM fundamentals WHERE user_id=? AND ticker=?",
+            (uid, tk)).fetchone():
         try:
             _sec_fundamentals(tk, conn, uid)
         except SEC.SecDataError as e:
             fundamentales_nota = e.detail
 
-    report = analyze(tk, {"assumptions": body.assumptions or {}}, uid, conn)
+    report = _analysis_report(tk, {"assumptions": body.assumptions or {}}, uid, conn,
+                              completo=not en_modo_plan)
     price = report["precio_actual"]["valor"]
     cash_row = conn.execute("SELECT amount FROM cash WHERE user_id=?", (uid,)).fetchone()
     efectivo_antes = cash_row["amount"] if cash_row else 0.0
@@ -258,7 +305,7 @@ def trade_check(body: TradeCheckIn, uid: int = Depends(current_user), conn=Depen
     peso_antes = round(pos_value / total_antes * 100, 2) if total_antes else None
     peso_despues = round(valor_despues / total_despues * 100, 2) if total_despues else None
 
-    limits = {**RK.DEFAULT_LIMITS, **(D.get_setting(conn, uid, "limits", {}) or {})}
+    limits = CU.limites_efectivos(conn, uid)
     sector = (pos or {}).get("sector") or RK.KNOWN_SECTORS.get(tk, "sin clasificar")
     sector_value = valor_despues + sum(
         p["market_value"] or 0 for p in positions if p["ticker"] != tk
@@ -321,7 +368,7 @@ def trade_check(body: TradeCheckIn, uid: int = Depends(current_user), conn=Depen
                             (uid, tk)).fetchone()
     fund_data = json.loads(fund_row["data"]) if fund_row else None
     numeric_keys = [k for k, _ in AN.FUND_FIELDS if k not in AN.TEXT_FUND_FIELDS]
-    prof = D.get_setting(conn, uid, "risk_profile", {}) or {}
+    prof = CU.perfil_efectivo(conn, uid)
     operacion = {
         "operacion": body.side, "ticker": tk, "monto_usd": amount,
         "precio": {"valor": price, "fuente": report["precio_actual"]["fuente"],
@@ -336,19 +383,22 @@ def trade_check(body: TradeCheckIn, uid: int = Depends(current_user), conn=Depen
         "motor": {"propuesta": report["decision"]["decision_propuesta"],
                   "confianza": report["decision"]["nivel_confianza"],
                   "argumentos": report["decision"]["argumentos"]},
-        "valoracion": {"calculable": scen["calculable"],
-                       "valor_base_por_accion": (scen["escenarios"]["base"].get("valor_estimado_por_accion")
-                                                 if scen["calculable"] else None),
-                       "margen_seguridad_base_pct": (scen["escenarios"]["base"].get("margen_de_seguridad_pct")
-                                                    if scen["calculable"] else None)},
-        "multiplos": report["multiplos"]["multiples"],
-        "fundamentales": ({k: fund_data[k] for k in numeric_keys if k in fund_data}
-                          | {"fuente": fund_row["source"], "asof": fund_row["asof"]}) if fund_row else None,
-        "tecnica": ({k: tec[k] for k in ("tendencia", "rsi14", "distancia_a_maximo_pct",
-                                        "volatilidad_anualizada_pct") if k in tec}
-                    if tec and "error" not in tec else None),
-        "niveles": tec.get("niveles") if tec and "error" not in tec else None,
-        "mercado_hoy": _mercado_hoy(),
+        "valoracion": None if en_modo_plan else {
+            "calculable": scen["calculable"],
+            "valor_base_por_accion": (scen["escenarios"]["base"].get("valor_estimado_por_accion")
+                                      if scen["calculable"] else None),
+            "margen_seguridad_base_pct": (scen["escenarios"]["base"].get("margen_de_seguridad_pct")
+                                          if scen["calculable"] else None)},
+        "multiplos": None if en_modo_plan else report["multiplos"]["multiples"],
+        "fundamentales": (None if en_modo_plan else
+                          ({k: fund_data[k] for k in numeric_keys if k in fund_data}
+                           | {"fuente": fund_row["source"], "asof": fund_row["asof"]}) if fund_row else None),
+        "tecnica": (None if en_modo_plan else
+                    ({k: tec[k] for k in ("tendencia", "rsi14", "distancia_a_maximo_pct",
+                                          "volatilidad_anualizada_pct") if k in tec}
+                     if tec and "error" not in tec else None)),
+        "niveles": None if en_modo_plan else (tec.get("niveles") if tec and "error" not in tec else None),
+        "mercado_hoy": None if en_modo_plan else _mercado_hoy(),
         "perfil": {k: prof.get(k) for k in DE.RISK_PROFILE_FIELDS},
         "fecha": D.now(),
     }
@@ -358,12 +408,13 @@ def trade_check(body: TradeCheckIn, uid: int = Depends(current_user), conn=Depen
     proposal["operacion_evaluada"] = operacion
     conn.execute("UPDATE decisions SET proposal=? WHERE id=?",
                  (json.dumps(proposal, ensure_ascii=False), report["decision_id"]))
-    return {**operacion, "analisis": report, "decision_id": report["decision_id"],
+    return {**operacion, "analisis": None if en_modo_plan else report,
+            "decision_id": report["decision_id"], "modo_plan": mp, "bloqueado_por_plan": False,
             "fundamentales_nota": fundamentales_nota, "efectivo_suficiente": efectivo_suficiente,
             "nota": "Cálculo sin comisiones de Hapi ni variación del precio de ejecución."}
 
 
-@router.post("/api/trade_check/{did}/luna")
+@router.post("/api/trade_check/{did}/luna", dependencies=[Depends(bloquear_en_modo_plan)])
 def trade_check_luna(did: int, uid: int = Depends(current_user), conn=Depends(conn_dep)):
     """Segunda opinión de Luna sobre la operación ya evaluada (no cambia nada)."""
     row = conn.execute("SELECT proposal FROM decisions WHERE id=? AND user_id=?", (did, uid)).fetchone()
@@ -389,7 +440,7 @@ def risk_get(uid: int = Depends(current_user), conn=Depends(conn_dep)):
     cash_row = conn.execute("SELECT amount, currency FROM cash WHERE user_id=?", (uid,)).fetchone()
     if cash_unsupported(cash_row):
         return {"error": "Riesgo no calculable: el efectivo no está en USD"}
-    limits = D.get_setting(conn, uid, "limits", {}) or {}
+    limits = CU.limites_efectivos(conn, uid)
     result = RK.portfolio_risk(positions, cash_row["amount"] if cash_row else 0, limits)
     result["estres_por_posicion"] = {p["ticker"]: RK.stress_position(p["market_value"] or 0) for p in positions}
     return result
@@ -397,9 +448,22 @@ def risk_get(uid: int = Depends(current_user), conn=Depends(conn_dep)):
 
 @router.put("/api/limits")
 def limits_put(body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep)):
-    limits = {**(D.get_setting(conn, uid, "limits", {}) or {}), **body}
-    D.set_setting(conn, uid, "limits", limits)
-    return {"ok": True, "limits": {**RK.DEFAULT_LIMITS, **limits}}
+    """Cuerdas: endurecer aplica ya; aflojar espera 7 días con motivo en el Diario."""
+    try:
+        res = CU.proponer(conn, uid, body, rules=CU.LIMIT_RULES, setting_key="limits",
+                          pending_key=CU.LIMITES_PENDIENTES, nombre="límites",
+                          defaults=RK.DEFAULT_LIMITS)
+    except CU.CuerdasError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, **res, "limits": CU.limites_efectivos(conn, uid)}
+
+
+@router.delete("/api/limits/pendientes")
+def limits_pendientes_delete(uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    batch = CU.cancelar(conn, uid, CU.LIMITES_PENDIENTES)
+    if batch is None:
+        raise HTTPException(404, "No hay cambio de límites pendiente")
+    return {"ok": True, "cancelado": batch}
 
 
 # ---------- Módulo 10: oportunidades ----------
@@ -442,7 +506,7 @@ def alerts(uid: int = Depends(current_user), conn=Depends(conn_dep)):
     out = []
     positions = enrich_positions(conn, uid)
     cash_row = conn.execute("SELECT amount, currency FROM cash WHERE user_id=?", (uid,)).fetchone()
-    limits = D.get_setting(conn, uid, "limits", {}) or {}
+    limits = CU.limites_efectivos(conn, uid)
     missing_value = without_current_value(positions)
     rk = RK.portfolio_risk(positions, cash_row["amount"] if cash_row else 0, limits) \
         if not missing_value and not cash_unsupported(cash_row) else {}
@@ -474,7 +538,7 @@ def alerts(uid: int = Depends(current_user), conn=Depends(conn_dep)):
         if d.get("next_earnings_date") and str(d["next_earnings_date"]) <= today:
             out.append({"type": "resultados", "level": "revision_necesaria",
                         "text": f"{f['ticker']}: la fecha de resultados registrada ({d['next_earnings_date']}) ya pasó — actualiza fundamentales"})
-    prof = D.get_setting(conn, uid, "risk_profile", {}) or {}
+    prof = CU.perfil_efectivo(conn, uid)
     if not DE.profile_completeness(prof)["complete"]:
         out.append({"type": "perfil", "level": "informativa",
                     "text": "Completa tu perfil de inversionista para recibir recomendaciones personalizadas"})
@@ -517,7 +581,7 @@ def journal_evaluate(jid: int, body: dict, uid: int = Depends(current_user), con
     return {"ok": True}
 
 
-@router.post("/api/journal/{jid}/challenge")
+@router.post("/api/journal/{jid}/challenge", dependencies=[Depends(bloquear_en_modo_plan)])
 def journal_challenge(jid: int, uid: int = Depends(current_user), conn=Depends(conn_dep)):
     row = conn.execute("SELECT data, ticker, created_at FROM journal WHERE id=? AND user_id=?", (jid, uid)).fetchone()
     if not row:

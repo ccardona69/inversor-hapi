@@ -259,13 +259,6 @@ def photo_save(body: dict, uid: int = Depends(current_user), conn=Depends(conn_d
             "eliminadas": eliminadas, "cash": cash, "detail": detail}
 
 
-@router.post("/api/positions/verify_all")
-def verify_all(uid: int = Depends(current_user), conn=Depends(conn_dep)):
-    cur = conn.execute("UPDATE positions SET verified=1, updated_at=? WHERE user_id=? AND verified=0",
-                       (D.now(), uid))
-    return {"ok": True, "confirmadas": cur.rowcount}
-
-
 # ---------- Módulo 2: validación ----------
 
 @router.get("/api/validate")
@@ -312,7 +305,22 @@ def validate(uid: int = Depends(current_user), conn=Depends(conn_dep)):
 
 
 @router.post("/api/positions/{ticker}/verify")
-def verify_position(ticker: str, uid: int = Depends(current_user), conn=Depends(conn_dep)):
-    conn.execute("UPDATE positions SET verified=1, updated_at=? WHERE user_id=? AND ticker=?",
-                 (D.now(), uid, ticker.upper()))
-    return {"ok": True}
+def verify_position(ticker: str, body: Optional[dict] = None,
+                    uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    """Verificar una posición exige evidencia («captura Hapi 2026-10-02»):
+    queda en notes y es lo que da valor al marcador de verificación."""
+    ev = (body or {}).get("evidencia")
+    if not isinstance(ev, str) or not 3 <= len(ev.strip()) <= 300:
+        raise HTTPException(400, "Evidencia obligatoria: un texto de 3 a 300 caracteres "
+                               "(p. ej. «captura Hapi 2026-10-02»)")
+    ev = ev.strip()
+    tk = ticker.upper()
+    row = conn.execute("SELECT notes FROM positions WHERE user_id=? AND ticker=?",
+                       (uid, tk)).fetchone()
+    if row is None:
+        raise HTTPException(404, f"No hay posición en {tk}")
+    notas = (row["notes"] or "").rstrip()
+    notas = (notas + "\n" if notas else "") + f"[verificada {D.now()[:10]}: {ev}]"
+    conn.execute("UPDATE positions SET verified=1, notes=?, updated_at=? "
+                 "WHERE user_id=? AND ticker=?", (notas, D.now(), uid, tk))
+    return {"ok": True, "evidencia": ev}

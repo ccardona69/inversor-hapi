@@ -19,6 +19,11 @@ from app import marketdata as MD
 from app import photosync as PS
 from app.main import app
 
+# La suite previa prueba el interior de las funciones; la puerta del
+# modo plan (409 con el ETF bajo la meta) se abre con el estado inactivo.
+pytestmark = pytest.mark.usefixtures("sin_modo_plan")
+
+
 client = TestClient(app)
 
 FUND_NVDA_TEST = {  # DATOS DE PRUEBA (no reales): sirven para validar los cálculos
@@ -184,7 +189,8 @@ def test_alerts_concentration_and_profile(session):
 
 def test_profile_completion_changes_alert(session):
     c = session
-    prof = {f: "1" for f in DE.RISK_PROFILE_FIELDS}
+    prof = {"horizonte_anios": 10, "objetivo": "largo plazo",
+            "perdida_maxima_pct": 15, "nivel_riesgo": "moderado"}
     r = c.put("/api/profile", json=prof)
     assert r.json()["complete"]
     al = c.get("/api/alerts").json()["alerts"]
@@ -423,10 +429,24 @@ def test_photo_save_confirmed_and_replace_all(isolated):
 
 
 def test_verify_all_positions(isolated):
+    """verify_all ya no existe: verificar exige evidencia, posición por posición."""
     c = isolated
     c.post("/api/positions", json={"ticker": "AAA", "qty": 1, "invested": 10})
     c.post("/api/positions", json={"ticker": "BBB", "qty": 1, "invested": 10})
     r = c.post("/api/positions/verify_all")
-    assert r.status_code == 200 and r.json()["confirmadas"] == 2
-    assert all(p["verified"] for p in c.get("/api/portfolio").json()["positions"])
-    assert c.post("/api/positions/verify_all").json()["confirmadas"] == 0
+    assert r.status_code in (404, 405)
+
+
+def test_verify_position_requires_evidence(isolated):
+    c = isolated
+    c.post("/api/positions", json={"ticker": "AAA", "qty": 1, "invested": 10})
+    assert c.post("/api/positions/AAA/verify").status_code == 400       # sin evidencia
+    assert c.post("/api/positions/AAA/verify", json={"evidencia": "ok"}).status_code == 400
+    assert c.post("/api/positions/AAA/verify", json={"evidencia": 12}).status_code == 400
+    assert c.post("/api/positions/NOPE/verify",
+                  json={"evidencia": "captura Hapi 2026-10-02"}).status_code == 404
+    r = c.post("/api/positions/AAA/verify", json={"evidencia": "captura Hapi 2026-10-02"})
+    assert r.status_code == 200 and r.json()["evidencia"] == "captura Hapi 2026-10-02"
+    pos = c.get("/api/portfolio").json()["positions"][0]
+    assert pos["verified"] == 1
+    assert "[verificada" in (pos["notes"] or "") and "captura Hapi 2026-10-02" in pos["notes"]

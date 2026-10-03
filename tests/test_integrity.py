@@ -9,6 +9,11 @@ from app import marketdata as MD
 from app import photosync as PS
 from app.main import app
 
+# La suite previa prueba el interior de las funciones; la puerta del
+# modo plan (409 con el ETF bajo la meta) se abre con el estado inactivo.
+pytestmark = pytest.mark.usefixtures("sin_modo_plan")
+
+
 
 @pytest.fixture
 def session(tmp_path, monkeypatch):
@@ -38,14 +43,16 @@ def test_editing_a_verified_position_requires_verification_again(session):
         return session.get("/api/portfolio").json()["positions"][0]
 
     assert position()["verified"] == 0
-    assert session.post("/api/positions/NVDA/verify").status_code == 200
+    assert session.post("/api/positions/NVDA/verify",
+                        json={"evidencia": "captura Hapi de prueba"}).status_code == 200
     assert position()["verified"] == 1
 
     changed = {**initial, "qty": 3, "invested": 150}
     assert session.post("/api/positions", json=changed).status_code == 200
     assert position()["qty"] == 3 and position()["verified"] == 0
 
-    assert session.post("/api/positions/NVDA/verify").status_code == 200
+    assert session.post("/api/positions/NVDA/verify",
+                        json={"evidencia": "captura Hapi de prueba"}).status_code == 200
     assert session.post("/api/hapi/photo/save", json={"rows": [
         {"ticker": "NVDA", "qty": 4, "invested": 200}]}).status_code == 200
     assert position()["qty"] == 4 and position()["verified"] == 0

@@ -21,6 +21,7 @@ from app.routes import marcador as MARC  # noqa: E402
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "red: la prueba puede tocar Yahoo (integración tolerante a fallos)")
+    config.addinivalue_line("markers", "presupuesto_ia: la prueba usa el tope mensual real de IA (sin parchear consumir_presupuesto)")
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +54,10 @@ def sin_red(request, monkeypatch):
             return ai_request(*args, client=client, **kwargs)
 
         monkeypatch.setattr(AIP, "request", _ai_sin_red)
+    if request.node.get_closest_marker("presupuesto_ia") is None:
+        # El tope mensual real solo corre en las pruebas del marcador
+        # presupuesto_ia; al resto no le descuenta llamadas.
+        monkeypatch.setattr(AIP, "consumir_presupuesto", lambda now=None: None)
     MP._clear_cache()
     MARC._clear_cache()
     yield
@@ -83,3 +88,13 @@ class FakeClient:
 @pytest.fixture
 def fake_client():
     return FakeClient
+
+
+@pytest.fixture
+def sin_modo_plan(monkeypatch):
+    """Abre la puerta del modo plan para la suite previa: las pruebas de radar,
+    pulso, Luna, análisis y trade_check siguen probando su interior con un
+    estado de plan inactivo. La puerta en sí se prueba en test_modo_plan.py."""
+    monkeypatch.setattr(MARC, "modo_plan_estado",
+                        lambda conn, uid: {"activo": False, "etf_pct": None,
+                                           "meta_pct": None, "motivo": None})

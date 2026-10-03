@@ -6,6 +6,7 @@ invertido en el índice a retorno total. Las descargas de Yahoo (SPY y PEN=X)
 se cachean 6 h; si Yahoo falla, el fantasma queda «sin dato» y los costos se
 estiman con la tarifa configurada — jamás con el tc implícito ni fx_default.
 """
+import math
 from datetime import date, datetime, timezone
 from typing import Optional
 
@@ -94,6 +95,37 @@ def estado_plan(conn, uid):
             "faltan_precio": missing, "n_posiciones": len(pf["positions"])}
 
 
+def modo_plan_estado(conn, uid):
+    """Estado del modo plan sobre la foto actual del plan (sin red).
+
+    Todo el que lo consulte debe hacerlo por el nombre del módulo
+    (MARC.modo_plan_estado): un solo monkeypatch controla todas las puertas."""
+    e = estado_plan(conn, uid)
+    return BR.modo_plan(e["etf_pct"], e["etf_target_pct"])
+
+
+def modo_plan_detalle(mp, etf_plan):
+    """Cuerpo del 409 del modo plan, único para todas las funciones cerradas."""
+    pct = f"{mp['etf_pct']:g} %" if mp["etf_pct"] is not None else "sin dato"
+    meta = mp["meta_pct"]
+    meta_txt = f"{meta:g} %" if isinstance(meta, (int, float)) else "sin dato"
+    return {"modo_plan": True,
+            "message": f"Modo plan activo: el ETF está en {pct} de tu meta de {meta_txt}. "
+                       f"El próximo dinero va al ETF del plan ({etf_plan}). "
+                       "Esta función vuelve cuando el ETF llegue a la meta.",
+            **mp}
+
+
+def bloquear_en_modo_plan(uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    """Puerta del modo plan: con el ETF bajo la meta, las «sirenas» (radar,
+    pulso, niveles, Luna, análisis fuera del ETF del plan) responden 409."""
+    mp = modo_plan_estado(conn, uid)
+    if not mp["activo"]:
+        return
+    etf_plan = D.get_setting(conn, uid, "etf_plan", SB.SETTINGS_DEFAULTS["etf_plan"])
+    raise HTTPException(409, modo_plan_detalle(mp, etf_plan))
+
+
 def _fx_lookup(fx_rows):
     """tc de mercado del día del depósito (o del día hábil anterior), ya
     normalizado a soles por dólar. None si Yahoo no dio un valor usable."""
@@ -176,7 +208,7 @@ def marcador(uid: int = Depends(current_user), conn=Depends(conn_dep)):
         "con_calculo": sum(1 for d in m["costos_detalle"] if d["etiqueta"] == "CÁLCULO"),
         "total": m["n_depositos"]}
     return {"marcador": m, "fantasma": fantasma, "alcancia": alc,
-            "avisos": _avisos(settings, alc),
+            "avisos": _avisos(settings, alc), "modo_plan": modo_plan_estado(conn, uid),
             "pesos": estado["pesos"], "etf_pct": estado["etf_pct"],
             "etf_target_pct": estado["etf_target_pct"], "etf_plan": etf_plan,
             "valor_base_usd": estado["valor_base_usd"],
@@ -252,6 +284,7 @@ def brecha_get(aporte_nuevo_usd: float = 0.0,
                       "existe después de comprarla")
     etiqueta = "ESTIMACIÓN" if avisos else "CÁLCULO"
     return {"asof": D.now(), "valor_fuente": estado["valor_fuente"],
+            "modo_plan": modo_plan_estado(conn, uid),
             "etiqueta": etiqueta, "base": "posiciones", "evaluable": evaluable,
             "meta_pct": s["etf_target_pct"], "etf_pct": estado["etf_pct"],
             "valor_base_usd": estado["valor_base_usd"],
@@ -280,6 +313,68 @@ def plan_put(body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep
                                  + ", ".join(sorted(SB.ETF_META)))
     D.set_setting(conn, uid, "etf_plan", etf)
     return {"ok": True, "etf_plan": etf}
+
+
+# ---------- métricas de costo y cumplimiento del plan (solo lectura) ----------
+
+@router.get("/api/metricas")
+def metricas_get(uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    """Cuatro métricas del plan: exposición ETF, costo por depósito, compras
+    que sí fueron al plan y costo de la herramienta. Todo con su etiqueta;
+    lo que no se puede calcular se declara SIN DATO."""
+    estado = estado_plan(conn, uid)
+    s = estado["settings"]
+    fx_rows = None
+    try:
+        fx_rows = _history("PEN=X")["rows"]
+    except MD.MarketDataError:
+        pass  # costos de depósito quedan ESTIMACIÓN
+    fee = float(s["deposit_fee"] or 0)
+    m = SB.marcador(estado["rows"], estado["valor_actual"], fee,
+                    tc_lookup=_fx_lookup(fx_rows) if fx_rows else None)
+    n_dep = m["n_depositos"]
+    desde = str(s["plan_inicio"] or "")[:10]
+    compras = conn.execute(
+        "SELECT ticker, qty, price FROM trades WHERE user_id=? AND side='comprar' "
+        "AND substr(at, 1, 10) >= ?", (uid, desde)).fetchall()
+    usd_total = usd_etf = 0.0
+    for t in compras:
+        usd = (t["qty"] or 0) * (t["price"] or 0)
+        usd_total += usd
+        if t["ticker"] in SB.ETF_META:
+            usd_etf += usd
+    mensual = s["costo_sistema_mensual_usd"]
+    anual = round(mensual * 12, 2) if isinstance(mensual, (int, float)) else None
+    base = estado["valor_base_usd"]
+    return {"asof": D.now(),
+            "etf_pct": {"valor": estado["etf_pct"], "meta": estado["etf_target_pct"],
+                        "etiqueta": "CÁLCULO" if estado["etf_pct"] is not None else "SIN DATO"},
+            "costo_por_deposito": {"valor": (round(m["costos_deposito"] / n_dep, 2)
+                                             if n_dep else None),
+                                   "n": n_dep,
+                                   "etiqueta": m["costos_etiqueta"] if n_dep else "SIN DATO"},
+            "compras_al_plan": {"valor_pct": (round(usd_etf / usd_total * 100, 2)
+                                              if usd_total else None),
+                                "usd_etf": round(usd_etf, 2), "usd_total": round(usd_total, 2),
+                                "n_compras": len(compras), "desde": desde,
+                                "fuente": "órdenes importadas (trades)",
+                                "etiqueta": "CÁLCULO" if compras else "SIN DATO"},
+            "costo_sistema": {"mensual_usd": mensual, "anual_usd": anual,
+                              "pct_cartera": (round(anual / base * 100, 2)
+                                              if anual is not None and base else None),
+                              "etiqueta": "CÁLCULO (HR)" if anual is not None else "SIN DATO"},
+            "revision_abandono": s["revision_abandono"]}
+
+
+@router.put("/api/metricas/costo_sistema")
+def metricas_costo_sistema(body: dict, uid: int = Depends(current_user), conn=Depends(conn_dep)):
+    """Costo mensual de la herramienta (HR — lo declara el usuario con su factura)."""
+    v = body.get("mensual_usd")
+    if (isinstance(v, bool) or not isinstance(v, (int, float))
+            or not math.isfinite(v) or not 0 <= v <= 10000):
+        raise HTTPException(400, "mensual_usd debe ser un número finito entre 0 y 10000")
+    D.set_setting(conn, uid, "costo_sistema_mensual_usd", v)
+    return {"ok": True, "mensual_usd": v}
 
 
 # ---------- borrador → confirmación de movimientos (flows) ----------
