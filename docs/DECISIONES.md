@@ -122,6 +122,30 @@ reversión. Las decisiones se agregan al final; no se editan.
   ETF; transferencia automática del banco el día de pago; comparar tipo de
   cambio banco vs casas de cambio; preguntar a Hapi por depósitos directos en
   USD; alerta de presupuesto en Azure.
+- **Actualización 2026-10-03 (investigación del agente, HR):**
+  - Hapi sí acepta depósitos directos desde Perú: Cross Payments en **soles**
+    (mín. USD 1.99 por depósito) y en **dólares** (0.45 %, mín. USD 2.99), y
+    wire SWIFT internacional sin comisión de Hapi (el banco/intermediario
+    puede cobrar; 1–3 días hábiles). Fuentes: help.hapi.trade
+    (artículos 8976002, 12631400, 10244510), consultados 2026-10-03.
+  - Casas de cambio online reguladas por la SBS (Rextie, Kambista, TuCambista,
+    TKambio, Cambia FX): sin comisión explícita, spread ≈ 0.87 %
+    (tipodecambio.pe, 2026-10-03) vs ≈ 3.5 % medido en «Yape Compra USD».
+    Ruta alternativa ilustrativa para un aporte de ≈ USD 135: casa online
+    (≈ USD 1.2 de spread) + Cross Payments USD (mín. USD 2.99) ≈ USD 4.2
+    frente a los ≈ USD 7.7 actuales (EST). La conversión dentro de Cross
+    Payments en soles tiene su propio tc: SIN DATO — compararlo en la app el
+    día del depósito.
+  - Alerta de presupuesto Azure: no creable sin acceso a la cuenta; pasos:
+    Azure Portal → Cost Management + Billing → Budgets → Add (mensual) →
+    acción «alert» con email. El tope de la app (30 llamadas/mes) ya corta el
+    gasto por dentro.
+  - Push a GitHub bloqueado: «You must verify your email address» (403). El
+    usuario debe verificar el correo de la cuenta o empujar manualmente.
+  - Despliegue al VPS bloqueado: no hay host/alias SSH documentado (regla 10:
+    IP fuera del repo). El usuario puede ejecutar en el VPS:
+    `git pull && sudo systemctl restart <servicio>` tras backup de la base,
+    o entregar el host al agente.
 - **Reversión:** nueva entrada con fecha y motivo.
 
 ## D-09 — 2026-10-02 — Modo plan (P1)
