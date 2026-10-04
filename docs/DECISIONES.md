@@ -197,3 +197,25 @@ reversión. Las decisiones se agregan al final; no se editan.
   + un ETF).
 - **AWS:** recordatorio de decisión de plan el 2027-03-01 (vence 2027-04-01,
   D-06).
+
+## D-14 — 2026-10-04 — Prompt de la IA asesora v3.2
+
+- **Decisión:** se adopta `docs/PROMPT_ASESOR.md` v3.2 (v3.1 del usuario + N1,
+  N2, N3 y tres ajustes menores), subordinado a BRIEF, AGENTS, PLANOS y este
+  registro. Se añade a AGENTS §11.
+- **D-08 ratificada (N1):** no vender; la meta se alcanza solo con dinero
+  nuevo. Rebalancear vendiendo deja de presentarse como ruta abierta.
+- **C2 opción 1:** `barata_y_buena` (`app/radar.py:53,56,99`) se acepta como
+  etiqueta técnica del radar; no se renombra.
+- **Satélite de 5 %:** solo para posiciones nuevas, en Fase 2 vía GC. Hoy el
+  motor tiene un único «Máximo por empresa» (`app/routes/decisions.py:338-341`).
+  `max_position_pct` no se cambia.
+- **Hallazgo anotado sin tocar (congelamiento D-13):** `max_trades_per_month`
+  no se aplica en `trade_check`; anotado en `docs/BACKLOG_FASE2.md`.
+- **G0:** árbol limpio; tag `pre-d14` sobre `a466970`; respaldo local
+  `backups/inversor-20261004-122530.db` (VACUUM INTO, `integrity_check` ok).
+  La base canónica del VPS no se tocó ni se respaldó en este paso (sin acceso
+  SSH documentado, D-08); el cambio es solo documental.
+- **Reversión:** `git revert` del commit de D-14, o nueva entrada con fecha y
+  motivo.
+

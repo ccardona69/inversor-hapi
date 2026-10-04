@@ -30,6 +30,14 @@ bloquearía migraciones — documentado en el blueprint.
 - Look-through del ETF en el HHI (hoy el ETF cuenta como una sola unidad).
 - Propagación de etiqueta más débil de punta a punta (P3.3 si no se cerró en
   v1.1): `resultado_real` del marcador sigue sin etiqueta propia.
+- `max_trades_per_month` (default 8, `app/risk.py:5`; validado en
+  `app/cuerdas.py:27`) no se aplica en `trade_check`
+  (`app/routes/decisions.py`): es un límite declarado, no vinculante (HV por
+  búsqueda, 2026-10-04). No se toca por el congelamiento de D-13 (D-14).
+- Satélite de 5 % solo para posiciones nuevas, vía GC (D-14): hoy el motor
+  aplica un único «Máximo por empresa» a todo lo que no es ETF
+  (`app/routes/decisions.py:338-341`); las posiciones heredadas (AMZN, GOOG)
+  no deben quedar en incumplimiento permanente.
 
 ## Prioridad 4 — Reconciliación y fiscal
 

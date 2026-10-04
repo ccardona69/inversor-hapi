@@ -271,6 +271,7 @@ principal, no un cliente.
 | docs/VERIFICACIONES.md | Historial de VA | creado |
 | docs/DECISIONES.md | Registro de decisiones del usuario | creado |
 | docs/BACKLOG_FASE2.md | Backlog Fase 2 | creado |
+| docs/PROMPT_ASESOR.md | Prompt de la IA asesora (v3.2); subordinado a BRIEF, AGENTS, PLANOS y DECISIONES | creado (D-14) |
 
 Crear los faltantes con la misma disciplina de etiquetas, previa aprobación.
 
